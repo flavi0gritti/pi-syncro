@@ -60,14 +60,28 @@ interface PullPreview {
   commitList: string;    // log oneline dei commit in arrivo
 }
 
+function hasLocalCommits(): boolean {
+  return gitQuiet("rev-parse HEAD").length > 0;
+}
+
 function buildPullPreview(): PullPreview | null {
   if (!hasRemote()) return null;
   if (!fetchRemote()) return null;
 
-  const behind = parseInt(gitQuiet(`rev-list HEAD..origin/${BRANCH} --count`)) || 0;
-  const ahead  = parseInt(gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`)) || 0;
-  const fileChanges = gitQuiet(`diff --stat HEAD...origin/${BRANCH}`);
-  const commitList  = gitQuiet(`log --oneline HEAD..origin/${BRANCH} -20`);
+  const localEmpty = !hasLocalCommits();
+
+  const behind = localEmpty
+    ? parseInt(gitQuiet(`rev-list origin/${BRANCH} --count`)) || 0
+    : parseInt(gitQuiet(`rev-list HEAD..origin/${BRANCH} --count`)) || 0;
+  const ahead = localEmpty
+    ? 0
+    : parseInt(gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`)) || 0;
+  const fileChanges = localEmpty
+    ? gitQuiet(`diff --stat $(git hash-object -t tree /dev/null) origin/${BRANCH}`)
+    : gitQuiet(`diff --stat HEAD...origin/${BRANCH}`);
+  const commitList = localEmpty
+    ? gitQuiet(`log --oneline origin/${BRANCH} -20`)
+    : gitQuiet(`log --oneline HEAD..origin/${BRANCH} -20`);
 
   return { behind, ahead, fileChanges, commitList };
 }
@@ -198,7 +212,14 @@ export default function (pi: ExtensionAPI) {
 
           ctx.ui.notify("Download in corso...", "info");
           try {
-            const pullOut = git(`pull origin ${BRANCH} --rebase`);
+            const isEmpty = !hasLocalCommits();
+            if (isEmpty) {
+              // Repo vuoto: fetch + checkout invece di pull (HEAD non esiste ancora)
+              git(`fetch origin ${BRANCH}`);
+              git(`checkout -b ${BRANCH} origin/${BRANCH}`);
+            } else {
+              const pullOut = git(`pull origin ${BRANCH} --rebase`);
+            }
             ctx.ui.notify("✅ Configurazione aggiornata da GitHub.\nSe hai nuove estensioni, fai /reload.", "success");
           } catch (err: any) {
             ctx.ui.notify(
@@ -221,8 +242,13 @@ export default function (pi: ExtensionAPI) {
 
           if (hasRemote()) {
             if (fetchRemote()) {
-              const behind = gitQuiet(`rev-list HEAD..origin/${BRANCH} --count`) || "0";
-              const ahead  = gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`) || "0";
+              const localEmpty = !hasLocalCommits();
+              const behind = localEmpty
+                ? gitQuiet(`rev-list origin/${BRANCH} --count`) || "0"
+                : gitQuiet(`rev-list HEAD..origin/${BRANCH} --count`) || "0";
+              const ahead = localEmpty
+                ? "0"
+                : gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`) || "0";
               if (behind !== "0") msg += `\n📥 Da scaricare: ${behind} commit`;
               if (ahead  !== "0") msg += `\n📤 Da inviare:   ${ahead} commit`;
               if (behind === "0" && ahead === "0") msg += "\n✅ In sync";

@@ -49,6 +49,7 @@ function ensureRepo()   { if (!existsSync(join(PI_DIR, '.git'))) die('Repo git n
 function hasRemote()    { return git('remote get-url origin', { ignoreError: true }).length > 0; }
 function ensureRemote() { if (!hasRemote()) die('Nessun remote. "pisync setup <url>".'); }
 function hasChanges()   { return git('status --porcelain', { ignoreError: true }).length > 0; }
+function hasLocalCommits() { return git('rev-parse HEAD', { ignoreError: true }).length > 0; }
 
 async function confirm(question) {
   if (!stdin.isTTY) return false;
@@ -120,8 +121,13 @@ function cmdDiff() {
   log('Contatto il remote...');
   try { git('fetch origin --quiet'); } catch { warn('Impossibile contattare il remote.'); return; }
 
-  const behind = git(`rev-list HEAD..origin/${BRANCH} --count`, { ignoreError: true }) || '0';
-  const ahead  = git(`rev-list origin/${BRANCH}..HEAD --count`, { ignoreError: true }) || '0';
+  const localEmpty = !hasLocalCommits();
+  const behind = localEmpty
+    ? git(`rev-list origin/${BRANCH} --count`, { ignoreError: true }) || '0'
+    : git(`rev-list HEAD..origin/${BRANCH} --count`, { ignoreError: true }) || '0';
+  const ahead  = localEmpty
+    ? '0'
+    : git(`rev-list origin/${BRANCH}..HEAD --count`, { ignoreError: true }) || '0';
 
   if (behind === '0') { ok('Già aggiornato. Nessuna modifica dal remote.'); return; }
 
@@ -129,10 +135,14 @@ function cmdDiff() {
   if (ahead !== '0') stdout.write(`  ${colors.yellow}📤 ${ahead} commit in partenza${colors.reset}`);
   stdout.write('\n\n');
 
-  const commits = git(`log --oneline HEAD..origin/${BRANCH} -20`, { ignoreError: true });
+  const commits = localEmpty
+    ? git(`log --oneline origin/${BRANCH} -20`, { ignoreError: true })
+    : git(`log --oneline HEAD..origin/${BRANCH} -20`, { ignoreError: true });
   if (commits) stdout.write(colors.dim + 'Commit in arrivo:\n' + commits + colors.reset + '\n\n');
 
-  const stat = git(`diff --stat HEAD...origin/${BRANCH}`, { ignoreError: true });
+  const stat = localEmpty
+    ? git(`diff --stat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
+    : git(`diff --stat HEAD...origin/${BRANCH}`, { ignoreError: true });
   if (stat) stdout.write(colors.dim + 'File che cambieranno:\n' + stat + colors.reset + '\n\n');
 
   log('Per applicare: pisync pull');
@@ -151,12 +161,19 @@ async function cmdPull() {
 
   // Anteprima
   try { git('fetch origin --quiet'); } catch { warn('Offline?'); }
-  const behind = git(`rev-list HEAD..origin/${BRANCH} --count`, { ignoreError: true }) || '0';
+  const localEmpty = !hasLocalCommits();
+  const behind = localEmpty
+    ? git(`rev-list origin/${BRANCH} --count`, { ignoreError: true }) || '0'
+    : git(`rev-list HEAD..origin/${BRANCH} --count`, { ignoreError: true }) || '0';
 
   if (behind === '0') { ok('Già aggiornato.'); return; }
 
-  const commits = git(`log --oneline HEAD..origin/${BRANCH} -20`, { ignoreError: true });
-  const stat = git(`diff --stat HEAD...origin/${BRANCH}`, { ignoreError: true });
+  const commits = localEmpty
+    ? git(`log --oneline origin/${BRANCH} -20`, { ignoreError: true })
+    : git(`log --oneline HEAD..origin/${BRANCH} -20`, { ignoreError: true });
+  const stat = localEmpty
+    ? git(`diff --stat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
+    : git(`diff --stat HEAD...origin/${BRANCH}`, { ignoreError: true });
   if (commits) stdout.write(colors.dim + commits + colors.reset + '\n\n');
   if (stat) stdout.write(colors.dim + stat + colors.reset + '\n\n');
 
@@ -165,7 +182,12 @@ async function cmdPull() {
 
   log('Download in corso...');
   try {
-    git(`pull origin ${BRANCH} --rebase`, { pipe: true });
+    if (localEmpty) {
+      git(`fetch origin ${BRANCH}`);
+      git(`checkout -b ${BRANCH} origin/${BRANCH}`);
+    } else {
+      git(`pull origin ${BRANCH} --rebase`, { pipe: true });
+    }
     ok('Configurazione aggiornata da GitHub.');
   } catch {
     warn('Conflitto! Risolvi con: cd ~/.pi/agent && git add . && git rebase --continue');
@@ -180,8 +202,13 @@ function cmdStatus() {
     log(`Remote: ${git('remote get-url origin')}`);
     try {
       git('fetch origin --quiet');
-      const behind = git(`rev-list HEAD..origin/${BRANCH} --count`, { ignoreError: true }) || '0';
-      const ahead  = git(`rev-list origin/${BRANCH}..HEAD --count`, { ignoreError: true }) || '0';
+      const localEmpty = !hasLocalCommits();
+      const behind = localEmpty
+        ? git(`rev-list origin/${BRANCH} --count`, { ignoreError: true }) || '0'
+        : git(`rev-list HEAD..origin/${BRANCH} --count`, { ignoreError: true }) || '0';
+      const ahead = localEmpty
+        ? '0'
+        : git(`rev-list origin/${BRANCH}..HEAD --count`, { ignoreError: true }) || '0';
       if (behind !== '0') log(`📥 ${behind} commit da scaricare`);
       if (ahead  !== '0') log(`📤 ${ahead} commit da inviare`);
       if (behind === '0' && ahead === '0') ok('In sync col remote.');
