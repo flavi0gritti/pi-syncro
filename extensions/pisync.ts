@@ -268,7 +268,7 @@ export default function (pi: ExtensionAPI) {
               "oppure conferma qui per SCARTARLE e procedere."
             );
             if (!discard) { ctx.ui.notify("Pull annullato.", "info"); return; }
-            try { git("checkout -- ."); } catch {}
+            try { git("checkout -- ."); gitQuiet("clean -fd"); } catch {}
           }
 
           // Anteprima di cosa sta per arrivare
@@ -290,9 +290,10 @@ export default function (pi: ExtensionAPI) {
           try {
             const isEmpty = !hasLocalCommits();
             if (isEmpty) {
-              // Repo vuoto: fetch + checkout invece di pull (HEAD non esiste ancora)
+              // Repo vuoto: fetch + checkout forzato (sovrascrive file locali)
+              // -f = force, --no-guess evita warning su branch non tracciati
               git(`fetch origin ${BRANCH}`);
-              git(`checkout -b ${BRANCH} origin/${BRANCH}`);
+              git(`checkout -f -b ${BRANCH} origin/${BRANCH} --no-guess`);
             } else {
               const pullOut = git(`pull origin ${BRANCH} --rebase`);
             }

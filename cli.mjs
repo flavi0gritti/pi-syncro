@@ -197,7 +197,7 @@ async function cmdPull() {
     stdout.write(colors.dim + git('status --short') + colors.reset + '\n');
     const proceed = await confirm('Scartarle e procedere col pull? (fai prima push per salvarle)');
     if (!proceed) { warn('Pull annullato.'); return; }
-    try { git('checkout -- .'); } catch {}
+    try { git('checkout -- .'); git('clean -fd', { ignoreError: true }); } catch {}
   }
 
   // Anteprima
@@ -228,7 +228,7 @@ async function cmdPull() {
   try {
     if (localEmpty) {
       git(`fetch origin ${BRANCH}`);
-      git(`checkout -b ${BRANCH} origin/${BRANCH}`);
+      git(`checkout -f -b ${BRANCH} origin/${BRANCH} --no-guess`);
     } else {
       git(`pull origin ${BRANCH} --rebase`, { pipe: true });
     }
