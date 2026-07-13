@@ -23,7 +23,7 @@ const BRANCH = "main";
 // ─── Git helpers ─────────────────────────────────────────────────────────────
 
 function git(args: string): string {
-  const result = execSync(`git ${args}`, { cwd: PI_DIR, encoding: "utf-8" });
+  const result = execSync(`git ${args}`, { cwd: PI_DIR, encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] });
   return (result || "").trim();
 }
 
@@ -107,10 +107,19 @@ function buildPullPreview(): PullPreview | null {
     ? 0
     : parseInt(gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`)) || 0;
 
-  const numstat = localEmpty
-    ? gitQuiet(`diff --numstat $(git hash-object -t tree /dev/null) origin/${BRANCH}`)
-    : gitQuiet(`diff --numstat HEAD...origin/${BRANCH}`);
-  const files = parseNumStat(numstat);
+  let files: FileChange[];
+  if (localEmpty) {
+    // Su Windows /dev/null non esiste; usiamo ls-tree per elencare i file
+    const fileList = gitQuiet(`ls-tree -r --name-only origin/${BRANCH}`);
+    files = fileList
+      .split("\n")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0)
+      .map((path) => ({ path, added: 0, deleted: 0, isNew: true }));
+  } else {
+    const numstat = gitQuiet(`diff --numstat HEAD...origin/${BRANCH}`);
+    files = parseNumStat(numstat);
+  }
 
   const commitList = localEmpty
     ? gitQuiet(`log --oneline origin/${BRANCH} -20`)

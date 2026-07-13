@@ -37,7 +37,8 @@ function die(msg)   { stderr.write(`${LABEL} ❌ ${msg}\n`); exit(1); }
 
 function git(args, opts = {}) {
   try {
-    const result = execSync(`git ${args}`, { cwd: PI_DIR, encoding: 'utf-8', stdio: opts.pipe ? 'inherit' : 'pipe', ...opts });
+    const stdio = opts.pipe ? 'inherit' : ['pipe', 'pipe', 'pipe'];
+    const result = execSync(`git ${args}`, { cwd: PI_DIR, encoding: 'utf-8', stdio, ...opts });
     return (result || '').trim();
   } catch (err) {
     if (opts.ignoreError) return '';
@@ -172,10 +173,18 @@ function cmdDiff() {
   if (ahead !== '0') header += `  ${colors.yellow}📤 ${ahead} commit in partenza${colors.reset}`;
   stdout.write(header + '\n\n');
 
-  const numstat = localEmpty
-    ? git(`diff --numstat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
-    : git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
-  const files = parseNumStat(numstat);
+  let files;
+  if (localEmpty) {
+    const fileList = git(`ls-tree -r --name-only origin/${BRANCH}`, { ignoreError: true });
+    files = fileList
+      .split('\n')
+      .map(p => p.trim())
+      .filter(p => p.length > 0)
+      .map(path => ({ path, added: 0, deleted: 0, isNew: true }));
+  } else {
+    const numstat = git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
+    files = parseNumStat(numstat);
+  }
   const fileSection = formatFileList(files, localEmpty);
   if (fileSection) stdout.write(fileSection + '\n');
 
@@ -203,10 +212,18 @@ async function cmdPull() {
 
   if (behind === '0') { ok('Già aggiornato.'); return; }
 
-  const numstat = localEmpty
-    ? git(`diff --numstat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
-    : git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
-  const files = parseNumStat(numstat);
+  let files;
+  if (localEmpty) {
+    const fileList = git(`ls-tree -r --name-only origin/${BRANCH}`, { ignoreError: true });
+    files = fileList
+      .split('\n')
+      .map(p => p.trim())
+      .filter(p => p.length > 0)
+      .map(path => ({ path, added: 0, deleted: 0, isNew: true }));
+  } else {
+    const numstat = git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
+    files = parseNumStat(numstat);
+  }
   const fileSection = formatFileList(files, localEmpty);
   if (fileSection) stdout.write(fileSection + '\n\n');
 
