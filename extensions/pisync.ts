@@ -76,6 +76,7 @@ function hasLocalCommits(): boolean {
  * Parsa l'output di git diff --numstat:
  *   riga: "added\tdeleted\tpath"
  *   per file binari: "-\t-\tpath"
+ * isNew viene deciso dal chiamante in base al contesto (repo vuoto o no).
  */
 function parseNumStat(raw: string): FileChange[] {
   return raw
@@ -87,9 +88,7 @@ function parseNumStat(raw: string): FileChange[] {
       if (parts.length < 3) return null;
       const added = parts[0] === "-" ? 0 : parseInt(parts[0]) || 0;
       const deleted = parts[1] === "-" ? 0 : parseInt(parts[1]) || 0;
-      // Un file è "nuovo" se non ha righe cancellate (aggiunto ex-novo)
-      // o se il diff è contro un albero vuoto (repo locale vuoto)
-      return { path: parts.slice(2).join("\t"), added, deleted, isNew: deleted === 0 };
+      return { path: parts.slice(2).join("\t"), added, deleted, isNew: false };
     })
     .filter((f): f is FileChange => f !== null);
 }
@@ -109,13 +108,21 @@ function buildPullPreview(): PullPreview | null {
 
   let files: FileChange[];
   if (localEmpty) {
-    // Repo vuoto: confronta origin/main contro il working tree locale
-    // così i file già presenti e identici su disco non compaiono
+    // Repo vuoto: diff origin/main vs working tree.
+    // added===0 significa che il file non esiste in locale (da creare)
     const numstat = gitQuiet(`diff --numstat origin/${BRANCH} -- .`);
     files = parseNumStat(numstat);
+    for (const f of files) {
+      f.isNew = f.added === 0; // file assente in locale → da creare
+    }
   } else {
+    // Repo con commit: diff locale vs remote.
+    // deleted===0 significa che il file è nuovo nel remote
     const numstat = gitQuiet(`diff --numstat HEAD...origin/${BRANCH}`);
     files = parseNumStat(numstat);
+    for (const f of files) {
+      f.isNew = f.deleted === 0; // file aggiunto nel remote
+    }
   }
 
   const commitList = localEmpty
@@ -126,7 +133,7 @@ function buildPullPreview(): PullPreview | null {
 }
 
 /** Costruisce un messaggio leggibile con l'elenco dei file */
-function formatFileList(files: FileChange[], localEmpty: boolean): string {
+function formatFileList(files: FileChange[], _localEmpty: boolean): string {
   if (files.length === 0) return "";
 
   const newFiles = files.filter((f) => f.isNew);
@@ -134,30 +141,31 @@ function formatFileList(files: FileChange[], localEmpty: boolean): string {
 
   let out = "";
 
-  if (localEmpty) {
-    // Primo pull: elenca tutti i file che verranno creati
-    out += `📦 File che verranno creati (${files.length}):\n`;
-    for (const f of files) {
+  if (newFiles.length > 0) {
+    out += `🆕 File da creare (${newFiles.length}):\n`;
+    for (const f of newFiles) {
       out += `   ✨ ${f.path}\n`;
     }
-  } else {
-    // Pull successivi: separa nuovi e modificati
-    if (newFiles.length > 0) {
-      out += `🆕 Nuovi file (${newFiles.length}):\n`;
-      for (const f of newFiles) {
-        out += `   ✨ ${f.path}\n`;
-      }
-    }
-    if (changedFiles.length > 0) {
-      if (out) out += "\n";
-      out += `✏️  File modificati (${changedFiles.length}):\n`;
-      for (const f of changedFiles) {
-        out += `   ${f.path}  +${f.added} −${f.deleted}\n`;
-      }
+  }
+  if (changedFiles.length > 0) {
+    if (out) out += "\n";
+    out += `✏️  File da aggiornare (${changedFiles.length}):\n`;
+    for (const f of changedFiles) {
+      out += `   ${f.path}  +${f.added} −${f.deleted}\n`;
     }
   }
 
   return out;
+}
+
+/** Restituisce il diff dettagliato per un singolo file */
+function fileDetailDiff(filePath: string): string {
+  const localEmpty = !hasLocalCommits();
+  if (localEmpty) {
+    return gitQuiet(`diff origin/${BRANCH} -- "${filePath}"`);
+  } else {
+    return gitQuiet(`diff HEAD...origin/${BRANCH} -- "${filePath}"`);
+  }
 }
 
 // ─── Estensione ──────────────────────────────────────────────────────────────
@@ -226,6 +234,17 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
+          // /sync diff <file> → dettaglio di un singolo file
+          if (extra) {
+            const detail = fileDetailDiff(extra);
+            if (!detail) {
+              ctx.ui.notify(`Nessuna differenza per: ${extra}`, "info");
+            } else {
+              ctx.ui.notify(`📝 Diff di ${extra}:\n\n${detail}`, "info");
+            }
+            return;
+          }
+
           ctx.ui.notify("🔍 Contatto il remote...", "info");
           const preview = buildPullPreview();
 
@@ -239,15 +258,43 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          let msg = `📥 ${preview.behind} commit in arrivo dal remote`;
-          if (preview.ahead > 0) msg += `  |  📤 ${preview.ahead} commit locali da inviare`;
+          // Se ci sono file, offri la selezione interattiva per il dettaglio
+          if (preview.files.length > 0 && ctx.hasUI) {
+            let msg = `📥 ${preview.behind} commit in arrivo dal remote`;
+            if (preview.ahead > 0) msg += `  |  📤 ${preview.ahead} commit locali da inviare`;
 
-          const fileSection = formatFileList(preview.files, preview.localEmpty);
-          if (fileSection) msg += `\n\n${fileSection}`;
+            const fileSection = formatFileList(preview.files, preview.localEmpty);
+            if (fileSection) msg += `\n\n${fileSection}`;
 
-          msg += "\n───────────────\nPer applicare: /sync pull";
+            msg += "\n───────────────\nPer applicare: /sync pull\nPer dettaglio: /sync diff <file>";
 
-          ctx.ui.notify(msg, "info");
+            // Proponi una selezione rapida dei file modificati
+            const choices = [
+              { value: "__pull__", label: "⬇️  Applica subito (/sync pull)" },
+              ...preview.files
+                .filter((f) => !f.isNew)
+                .map((f) => ({
+                  value: f.path,
+                  label: `🔍 ${f.path}  +${f.added} −${f.deleted}`,
+                })),
+            ];
+
+            if (choices.length > 1) {
+              const pick = await ctx.ui.select(
+                `Vuoi esplorare un file? (${preview.files.length} file in attesa)`,
+                choices
+              );
+              if (pick && pick !== "__pull__") {
+                const detail = fileDetailDiff(pick);
+                ctx.ui.notify(`📝 Diff di ${pick}:\n\n${detail}`, "info");
+                return;
+              }
+            } else {
+              ctx.ui.notify(msg, "info");
+            }
+          } else {
+            ctx.ui.notify("✅ Già aggiornato. Nessuna modifica in arrivo dal remote.", "info");
+          }
           break;
         }
 

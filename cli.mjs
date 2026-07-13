@@ -62,31 +62,35 @@ function parseNumStat(raw) {
       if (parts.length < 3) return null;
       const added = parts[0] === '-' ? 0 : parseInt(parts[0]) || 0;
       const deleted = parts[1] === '-' ? 0 : parseInt(parts[1]) || 0;
-      return { path: parts.slice(2).join('\t'), added, deleted, isNew: deleted === 0 };
+      return { path: parts.slice(2).join('\t'), added, deleted, isNew: false };
     })
     .filter(f => f !== null);
 }
 
-function formatFileList(files, localEmpty) {
+function formatFileList(files, _localEmpty) {
   if (files.length === 0) return '';
   const newFiles = files.filter(f => f.isNew);
   const changedFiles = files.filter(f => !f.isNew);
   let out = '';
-  if (localEmpty) {
-    out += `📦 File che verranno creati (${files.length}):\n`;
-    for (const f of files) out += `   ✨ ${f.path}\n`;
-  } else {
-    if (newFiles.length > 0) {
-      out += `🆕 Nuovi file (${newFiles.length}):\n`;
-      for (const f of newFiles) out += `   ✨ ${f.path}\n`;
-    }
-    if (changedFiles.length > 0) {
-      if (out) out += '\n';
-      out += `✏️  File modificati (${changedFiles.length}):\n`;
-      for (const f of changedFiles) out += `   ${f.path}  +${f.added} −${f.deleted}\n`;
-    }
+  if (newFiles.length > 0) {
+    out += `🆕 File da creare (${newFiles.length}):\n`;
+    for (const f of newFiles) out += `   ✨ ${f.path}\n`;
+  }
+  if (changedFiles.length > 0) {
+    if (out) out += '\n';
+    out += `✏️  File da aggiornare (${changedFiles.length}):\n`;
+    for (const f of changedFiles) out += `   ${f.path}  +${f.added} −${f.deleted}\n`;
   }
   return out;
+}
+
+function fileDetailDiff(filePath) {
+  const localEmpty = !hasLocalCommits();
+  if (localEmpty) {
+    return git(`diff origin/${BRANCH} -- "${filePath}"`, { ignoreError: true });
+  } else {
+    return git(`diff HEAD...origin/${BRANCH} -- "${filePath}"`, { ignoreError: true });
+  }
 }
 
 async function confirm(question) {
@@ -154,8 +158,17 @@ async function cmdPush() {
   ok('Configurazione sincronizzata su GitHub.');
 }
 
-function cmdDiff() {
+function cmdDiff(filePath) {
   ensureRepo(); ensureRemote();
+
+  // pisync diff <file> → dettaglio di un singolo file
+  if (filePath) {
+    const detail = fileDetailDiff(filePath);
+    if (!detail) { ok(`Nessuna differenza per: ${filePath}`); }
+    else { stdout.write(detail + '\n'); }
+    return;
+  }
+
   log('Contatto il remote...');
   try { git('fetch origin --quiet'); } catch { warn('Impossibile contattare il remote.'); return; }
 
@@ -182,11 +195,15 @@ function cmdDiff() {
     const numstat = git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
     files = parseNumStat(numstat);
   }
+  for (const f of files) {
+    f.isNew = localEmpty ? (f.added === 0) : (f.deleted === 0);
+  }
   const fileSection = formatFileList(files, localEmpty);
   if (fileSection) stdout.write(fileSection + '\n');
 
   stdout.write('───────────────\n');
   log('Per applicare: pisync pull');
+  log('Per dettaglio: pisync diff <file>');
 }
 
 async function cmdPull() {
@@ -211,12 +228,14 @@ async function cmdPull() {
 
   let files;
   if (localEmpty) {
-    // Repo vuoto: confronta origin/main contro il working tree
     const numstat = git(`diff --numstat origin/${BRANCH} -- .`, { ignoreError: true });
     files = parseNumStat(numstat);
   } else {
     const numstat = git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
     files = parseNumStat(numstat);
+  }
+  for (const f of files) {
+    f.isNew = localEmpty ? (f.added === 0) : (f.deleted === 0);
   }
   const fileSection = formatFileList(files, localEmpty);
   if (fileSection) stdout.write(fileSection + '\n\n');
@@ -310,7 +329,7 @@ const cmd = argv[2] || 'help';
     case 'setup':    cmdSetup(argv[3]); break;
     case 'push':     case 'upload':    await cmdPush(); break;
     case 'pull':     case 'download':  await cmdPull(); break;
-    case 'diff':     case 'preview':   case 'dry-run': cmdDiff(); break;
+    case 'diff':     case 'preview':   case 'dry-run': cmdDiff(argv[3]); break;
     case 'status':   case 'st':        cmdStatus(); break;
     case 'log':      case 'history':   cmdLog(); break;
     case 'remote':                      cmdRemote(argv[3]); break;
