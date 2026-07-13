@@ -1,0 +1,15 @@
+{
+  "name": "pi-syncro",
+  "version": "1.0.0",
+  "description": "Sync pi coding agent configuration across devices via GitHub. Provides /sync commands inside pi and a standalone CLI.",
+  "keywords": ["pi-coding-agent", "pi-extension", "sync", "config"],
+  "license": "MIT",
+  "pi": {
+    "extensions": ["./extensions/pisync.ts"]
+  },
+  "files": [
+    "extensions/",
+    "cli.mjs",
+    "README.md"
+  ]
+}
