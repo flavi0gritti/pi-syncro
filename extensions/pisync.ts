@@ -109,13 +109,10 @@ function buildPullPreview(): PullPreview | null {
 
   let files: FileChange[];
   if (localEmpty) {
-    // Su Windows /dev/null non esiste; usiamo ls-tree per elencare i file
-    const fileList = gitQuiet(`ls-tree -r --name-only origin/${BRANCH}`);
-    files = fileList
-      .split("\n")
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0)
-      .map((path) => ({ path, added: 0, deleted: 0, isNew: true }));
+    // Repo vuoto: confronta origin/main contro il working tree locale
+    // così i file già presenti e identici su disco non compaiono
+    const numstat = gitQuiet(`diff --numstat origin/${BRANCH} -- .`);
+    files = parseNumStat(numstat);
   } else {
     const numstat = gitQuiet(`diff --numstat HEAD...origin/${BRANCH}`);
     files = parseNumStat(numstat);

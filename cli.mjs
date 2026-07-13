@@ -175,12 +175,9 @@ function cmdDiff() {
 
   let files;
   if (localEmpty) {
-    const fileList = git(`ls-tree -r --name-only origin/${BRANCH}`, { ignoreError: true });
-    files = fileList
-      .split('\n')
-      .map(p => p.trim())
-      .filter(p => p.length > 0)
-      .map(path => ({ path, added: 0, deleted: 0, isNew: true }));
+    // Repo vuoto: confronta origin/main contro il working tree
+    const numstat = git(`diff --numstat origin/${BRANCH} -- .`, { ignoreError: true });
+    files = parseNumStat(numstat);
   } else {
     const numstat = git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
     files = parseNumStat(numstat);
@@ -214,12 +211,9 @@ async function cmdPull() {
 
   let files;
   if (localEmpty) {
-    const fileList = git(`ls-tree -r --name-only origin/${BRANCH}`, { ignoreError: true });
-    files = fileList
-      .split('\n')
-      .map(p => p.trim())
-      .filter(p => p.length > 0)
-      .map(path => ({ path, added: 0, deleted: 0, isNew: true }));
+    // Repo vuoto: confronta origin/main contro il working tree
+    const numstat = git(`diff --numstat origin/${BRANCH} -- .`, { ignoreError: true });
+    files = parseNumStat(numstat);
   } else {
     const numstat = git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
     files = parseNumStat(numstat);
