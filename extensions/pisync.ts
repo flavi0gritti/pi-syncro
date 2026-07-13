@@ -81,9 +81,10 @@ export default function (pi: ExtensionAPI) {
       const [sub, ...rest] = args.trim().split(/\s+/);
       const extra = rest.join(" ");
 
-      if (!existsSync(join(PI_DIR, ".git"))) {
+      const dotGit = join(PI_DIR, ".git");
+      if (!existsSync(dotGit)) {
         ctx.ui.notify(
-          "Repo git non trovato.\nEsegui /sync setup <url> per configurare il collegamento a GitHub.",
+          `Repo git non trovato in ${dotGit}.\n(homedir: ${homedir()})\nEsegui /sync setup <url> per configurare il collegamento a GitHub.`,
           "error"
         );
         return;
