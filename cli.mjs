@@ -51,6 +51,43 @@ function ensureRemote() { if (!hasRemote()) die('Nessun remote. "pisync setup <u
 function hasChanges()   { return git('status --porcelain', { ignoreError: true }).length > 0; }
 function hasLocalCommits() { return git('rev-parse HEAD', { ignoreError: true }).length > 0; }
 
+function parseNumStat(raw) {
+  return raw
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line => line.length > 0)
+    .map(line => {
+      const parts = line.split('\t');
+      if (parts.length < 3) return null;
+      const added = parts[0] === '-' ? 0 : parseInt(parts[0]) || 0;
+      const deleted = parts[1] === '-' ? 0 : parseInt(parts[1]) || 0;
+      return { path: parts.slice(2).join('\t'), added, deleted, isNew: deleted === 0 };
+    })
+    .filter(f => f !== null);
+}
+
+function formatFileList(files, localEmpty) {
+  if (files.length === 0) return '';
+  const newFiles = files.filter(f => f.isNew);
+  const changedFiles = files.filter(f => !f.isNew);
+  let out = '';
+  if (localEmpty) {
+    out += `📦 File che verranno creati (${files.length}):\n`;
+    for (const f of files) out += `   ✨ ${f.path}\n`;
+  } else {
+    if (newFiles.length > 0) {
+      out += `🆕 Nuovi file (${newFiles.length}):\n`;
+      for (const f of newFiles) out += `   ✨ ${f.path}\n`;
+    }
+    if (changedFiles.length > 0) {
+      if (out) out += '\n';
+      out += `✏️  File modificati (${changedFiles.length}):\n`;
+      for (const f of changedFiles) out += `   ${f.path}  +${f.added} −${f.deleted}\n`;
+    }
+  }
+  return out;
+}
+
 async function confirm(question) {
   if (!stdin.isTTY) return false;
   const rl = createInterface({ input: stdin, output: stderr });
@@ -131,20 +168,18 @@ function cmdDiff() {
 
   if (behind === '0') { ok('Già aggiornato. Nessuna modifica dal remote.'); return; }
 
-  stdout.write(`\n${colors.green}📥 ${behind} commit in arrivo${colors.reset}`);
-  if (ahead !== '0') stdout.write(`  ${colors.yellow}📤 ${ahead} commit in partenza${colors.reset}`);
-  stdout.write('\n\n');
+  let header = `${colors.green}📥 ${behind} commit in arrivo${colors.reset}`;
+  if (ahead !== '0') header += `  ${colors.yellow}📤 ${ahead} commit in partenza${colors.reset}`;
+  stdout.write(header + '\n\n');
 
-  const commits = localEmpty
-    ? git(`log --oneline origin/${BRANCH} -20`, { ignoreError: true })
-    : git(`log --oneline HEAD..origin/${BRANCH} -20`, { ignoreError: true });
-  if (commits) stdout.write(colors.dim + 'Commit in arrivo:\n' + commits + colors.reset + '\n\n');
+  const numstat = localEmpty
+    ? git(`diff --numstat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
+    : git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
+  const files = parseNumStat(numstat);
+  const fileSection = formatFileList(files, localEmpty);
+  if (fileSection) stdout.write(fileSection + '\n');
 
-  const stat = localEmpty
-    ? git(`diff --stat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
-    : git(`diff --stat HEAD...origin/${BRANCH}`, { ignoreError: true });
-  if (stat) stdout.write(colors.dim + 'File che cambieranno:\n' + stat + colors.reset + '\n\n');
-
+  stdout.write('───────────────\n');
   log('Per applicare: pisync pull');
 }
 
@@ -168,14 +203,12 @@ async function cmdPull() {
 
   if (behind === '0') { ok('Già aggiornato.'); return; }
 
-  const commits = localEmpty
-    ? git(`log --oneline origin/${BRANCH} -20`, { ignoreError: true })
-    : git(`log --oneline HEAD..origin/${BRANCH} -20`, { ignoreError: true });
-  const stat = localEmpty
-    ? git(`diff --stat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
-    : git(`diff --stat HEAD...origin/${BRANCH}`, { ignoreError: true });
-  if (commits) stdout.write(colors.dim + commits + colors.reset + '\n\n');
-  if (stat) stdout.write(colors.dim + stat + colors.reset + '\n\n');
+  const numstat = localEmpty
+    ? git(`diff --numstat $(git hash-object -t tree /dev/null) origin/${BRANCH}`, { ignoreError: true })
+    : git(`diff --numstat HEAD...origin/${BRANCH}`, { ignoreError: true });
+  const files = parseNumStat(numstat);
+  const fileSection = formatFileList(files, localEmpty);
+  if (fileSection) stdout.write(fileSection + '\n\n');
 
   const proceed = await confirm(`${behind} commit in arrivo. Scaricare?`);
   if (!proceed) { warn('Pull annullato.'); return; }

@@ -53,15 +53,45 @@ function fetchRemote(): boolean {
 
 // ─── Preview per il pull ────────────────────────────────────────────────────
 
+interface FileChange {
+  path: string;
+  added: number;
+  deleted: number;
+  isNew: boolean;
+}
+
 interface PullPreview {
   behind: number;
   ahead: number;
-  fileChanges: string;   // --stat
-  commitList: string;    // log oneline dei commit in arrivo
+  files: FileChange[];   // elenco file con +/- invece di --stat grezzo
+  commitList: string;     // log oneline dei commit in arrivo
+  localEmpty: boolean;
 }
 
 function hasLocalCommits(): boolean {
   return gitQuiet("rev-parse HEAD").length > 0;
+}
+
+/**
+ * Parsa l'output di git diff --numstat:
+ *   riga: "added\tdeleted\tpath"
+ *   per file binari: "-\t-\tpath"
+ */
+function parseNumStat(raw: string): FileChange[] {
+  return raw
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => {
+      const parts = line.split("\t");
+      if (parts.length < 3) return null;
+      const added = parts[0] === "-" ? 0 : parseInt(parts[0]) || 0;
+      const deleted = parts[1] === "-" ? 0 : parseInt(parts[1]) || 0;
+      // Un file è "nuovo" se non ha righe cancellate (aggiunto ex-novo)
+      // o se il diff è contro un albero vuoto (repo locale vuoto)
+      return { path: parts.slice(2).join("\t"), added, deleted, isNew: deleted === 0 };
+    })
+    .filter((f): f is FileChange => f !== null);
 }
 
 function buildPullPreview(): PullPreview | null {
@@ -76,14 +106,52 @@ function buildPullPreview(): PullPreview | null {
   const ahead = localEmpty
     ? 0
     : parseInt(gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`)) || 0;
-  const fileChanges = localEmpty
-    ? gitQuiet(`diff --stat $(git hash-object -t tree /dev/null) origin/${BRANCH}`)
-    : gitQuiet(`diff --stat HEAD...origin/${BRANCH}`);
+
+  const numstat = localEmpty
+    ? gitQuiet(`diff --numstat $(git hash-object -t tree /dev/null) origin/${BRANCH}`)
+    : gitQuiet(`diff --numstat HEAD...origin/${BRANCH}`);
+  const files = parseNumStat(numstat);
+
   const commitList = localEmpty
     ? gitQuiet(`log --oneline origin/${BRANCH} -20`)
     : gitQuiet(`log --oneline HEAD..origin/${BRANCH} -20`);
 
-  return { behind, ahead, fileChanges, commitList };
+  return { behind, ahead, files, commitList, localEmpty };
+}
+
+/** Costruisce un messaggio leggibile con l'elenco dei file */
+function formatFileList(files: FileChange[], localEmpty: boolean): string {
+  if (files.length === 0) return "";
+
+  const newFiles = files.filter((f) => f.isNew);
+  const changedFiles = files.filter((f) => !f.isNew);
+
+  let out = "";
+
+  if (localEmpty) {
+    // Primo pull: elenca tutti i file che verranno creati
+    out += `📦 File che verranno creati (${files.length}):\n`;
+    for (const f of files) {
+      out += `   ✨ ${f.path}\n`;
+    }
+  } else {
+    // Pull successivi: separa nuovi e modificati
+    if (newFiles.length > 0) {
+      out += `🆕 Nuovi file (${newFiles.length}):\n`;
+      for (const f of newFiles) {
+        out += `   ✨ ${f.path}\n`;
+      }
+    }
+    if (changedFiles.length > 0) {
+      if (out) out += "\n";
+      out += `✏️  File modificati (${changedFiles.length}):\n`;
+      for (const f of changedFiles) {
+        out += `   ${f.path}  +${f.added} −${f.deleted}\n`;
+      }
+    }
+  }
+
+  return out;
 }
 
 // ─── Estensione ──────────────────────────────────────────────────────────────
@@ -166,10 +234,12 @@ export default function (pi: ExtensionAPI) {
           }
 
           let msg = `📥 ${preview.behind} commit in arrivo dal remote`;
-          if (preview.ahead > 0) msg += `\n📤 ${preview.ahead} commit locali da inviare`;
-          if (preview.commitList) msg += `\n\n📜 Commit in arrivo:\n${preview.commitList}`;
-          if (preview.fileChanges) msg += `\n\n📝 File che cambieranno:\n${preview.fileChanges}`;
-          msg += "\n\nPer applicare: /sync pull";
+          if (preview.ahead > 0) msg += `  |  📤 ${preview.ahead} commit locali da inviare`;
+
+          const fileSection = formatFileList(preview.files, preview.localEmpty);
+          if (fileSection) msg += `\n\n${fileSection}`;
+
+          msg += "\n───────────────\nPer applicare: /sync pull";
 
           ctx.ui.notify(msg, "info");
           break;
@@ -199,8 +269,8 @@ export default function (pi: ExtensionAPI) {
           const preview = buildPullPreview();
           if (preview && preview.behind > 0) {
             let previewMsg = `📥 ${preview.behind} commit in arrivo.\n\n`;
-            if (preview.commitList) previewMsg += `Commit:\n${preview.commitList}\n\n`;
-            if (preview.fileChanges) previewMsg += `File che cambieranno:\n${preview.fileChanges}\n\n`;
+            const fileSection = formatFileList(preview.files, preview.localEmpty);
+            if (fileSection) previewMsg += `${fileSection}\n\n`;
             previewMsg += "Procedere col download?";
 
             const ok = await ctx.ui.confirm("Conferma pull", previewMsg);
