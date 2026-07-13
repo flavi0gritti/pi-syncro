@@ -81,7 +81,9 @@ export default function (pi: ExtensionAPI) {
       const [sub, ...rest] = args.trim().split(/\s+/);
       const extra = rest.join(" ");
 
-      if (!existsSync(join(PI_DIR, ".git"))) {
+      // setup e help non richiedono il repo git
+      const needsRepo = sub !== "setup" && sub !== "help";
+      if (needsRepo && !existsSync(join(PI_DIR, ".git"))) {
         ctx.ui.notify(
           "Repo git non trovato.\nEsegui /sync setup <url> per configurare il collegamento a GitHub.",
           "error"
