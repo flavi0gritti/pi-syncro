@@ -75,6 +75,11 @@ function buildPullPreview(): PullPreview | null {
 // ─── Estensione ──────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // NOTIFICA DI CARICAMENTO — per debug
+  pi.on("session_start", (_event, ctx) => {
+    ctx.ui.notify(`🔌 pi-syncro v1.1 caricato | PI_DIR=${PI_DIR} | .git esiste=${existsSync(join(PI_DIR, ".git"))}`, "info");
+  });
+
   pi.registerCommand("sync", {
     description: "Sync configurazione pi con GitHub: push, pull, diff, status, log, setup, remote",
     handler: async (args, ctx) => {
