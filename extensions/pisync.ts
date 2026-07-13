@@ -75,21 +75,15 @@ function buildPullPreview(): PullPreview | null {
 // ─── Estensione ──────────────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // NOTIFICA DI CARICAMENTO — per debug
-  pi.on("session_start", (_event, ctx) => {
-    ctx.ui.notify(`🔌 pi-syncro v1.1 caricato | PI_DIR=${PI_DIR} | .git esiste=${existsSync(join(PI_DIR, ".git"))}`, "info");
-  });
-
   pi.registerCommand("sync", {
     description: "Sync configurazione pi con GitHub: push, pull, diff, status, log, setup, remote",
     handler: async (args, ctx) => {
       const [sub, ...rest] = args.trim().split(/\s+/);
       const extra = rest.join(" ");
 
-      const dotGit = join(PI_DIR, ".git");
-      if (!existsSync(dotGit)) {
+      if (!existsSync(join(PI_DIR, ".git"))) {
         ctx.ui.notify(
-          `Repo git non trovato in ${dotGit}.\n(homedir: ${homedir()})\nEsegui /sync setup <url> per configurare il collegamento a GitHub.`,
+          "Repo git non trovato.\nEsegui /sync setup <url> per configurare il collegamento a GitHub.",
           "error"
         );
         return;
