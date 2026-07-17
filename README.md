@@ -146,4 +146,24 @@ Sul **Mac personale**: nessun `settings.local.json` → DeepSeek rimane attivo.
 
 ### Esclusioni per-macchina (`.syncignore`)
 
-Puoi creare un file `~/.pi/agent/.syncignore` (non sincronizzato) per escludere file specifici solo sulla macchina corrente:
+Per escludere interi file dalla sincronizzazione (non solo provider, ma qualsiasi file), usa `.syncignore`:
+
+```bash
+# In ~/.pi/agent/.syncignore:
+models-store.json        # mantieni modelli locali diversi
+*.local.json             # tutti i file .local.json
+themes/custom-theme.json # un tema specifico
+```
+
+Comandi:
+```
+/sync ignore add models-store.json
+/sync ignore list
+/sync ignore remove models-store.json
+```
+
+A differenza di `settings.local.json` (che applica regole dopo il pull), `.syncignore` impedisce proprio che i file vengano toccati da push e pull.
+
+**Quando usare cosa:**
+- `settings.local.json` → per adattare i file sincronizzati (es. escludere un provider)
+- `.syncignore` → per bloccare del tutto la sincronizzazione di certi file
