@@ -5,7 +5,7 @@ Sync della configurazione di [pi coding agent](https://github.com/earendil-works
 ## Installazione (qualsiasi OS)
 
 ```bash
-pi install git:github.com/tuouser/pi-syncro
+pi install git:github.com/flavi0gritti/pi-syncro
 ```
 
 Funziona ovunque: macOS, Linux, Windows (PowerShell, CMD, Git Bash, WSL).
@@ -38,7 +38,7 @@ Il comando `pisync` funziona aggiungendo la cartella del pacchetto al PATH:
 
 **macOS / Linux:**
 ```bash
-echo 'export PATH="$HOME/.pi/agent/git/github.com/tuouser/pi-syncro:$PATH"' >> ~/.zshrc
+echo 'export PATH="$HOME/.pi/agent/git/github.com/flavi0gritti/pi-syncro:$PATH"' >> ~/.zshrc
 ```
 
 **Windows PowerShell (profilo):**
@@ -62,7 +62,7 @@ $pkg = "$env:USERPROFILE\.pi\agent\git\github.com\tuouser\pi-syncro"
 ## Setup secondo dispositivo (Windows incluso)
 
 ```
-pi install git:github.com/tuouser/pi-syncro   # se non ancora installato
+pi install git:github.com/flavi0gritti/pi-syncro   # se non ancora installato
 ```
 
 Dentro pi:
