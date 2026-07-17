@@ -38,41 +38,39 @@ Il comando `pisync` funziona aggiungendo la cartella del pacchetto al PATH:
 
 **macOS / Linux:**
 ```bash
-echo 'export PATH="$HOME/.pi/agent/git/github.com/<user>/pi-syncro:$PATH"' >> ~/.zshrc
+echo 'export PATH="$HOME/.pi/agent/git/github.com/tuouser/pi-syncro:$PATH"' >> ~/.zshrc
 ```
 
 **Windows PowerShell (profilo):**
 ```powershell
-$pkg = "$env:USERPROFILE\.pi\agent\git\github.com\<user>\pi-syncro"
+$pkg = "$env:USERPROFILE\.pi\agent\git\github.com\tuouser\pi-syncro"
 [Environment]::SetEnvironmentVariable("Path", "$pkg;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")
 ```
 
 ## Setup primo dispositivo
 
-```bash
-# 1. Installa pi-syncro
-pi install git:github.com/<user>/pi-syncro
+**1. Crea un repo su GitHub** (pubblico o privato) per la tua config pi.
+   Esempio: `https://github.com/tuouser/pi-config`
+   Non serve inizializzarlo con README o .gitignore — pi-syncro fa tutto da solo.
 
-# 2. Dentro pi:
-/sync setup https://github.com/<user>/pi-config.git
+**2. Dentro pi:**
+```
+/sync setup https://github.com/tuouser/pi-config.git
 /sync push
 ```
 
 ## Setup secondo dispositivo (Windows incluso)
 
-```bash
-# 1. Installa pi (già fatto)
-# 2. Installa pi-syncro
-pi install git:github.com/<user>/pi-syncro
+```
+pi install git:github.com/tuouser/pi-syncro   # se non ancora installato
+```
 
-# 3. Dentro pi:
-/sync setup https://github.com/<user>/pi-config.git
+Dentro pi:
 
-# 4. Vedi cosa sta per arrivare:
-/sync diff
-
-# 5. Applica:
-/sync pull
+```
+/sync setup https://github.com/tuouser/pi-config.git
+/sync diff        → anteprima di cosa arriva
+/sync pull        → applica
 ```
 
 ## Windows — nota importante
@@ -81,7 +79,7 @@ Su Windows, l'installazione è identica. `pi install git:...` funziona nativamen
 Una volta installato:
 
 - **Dentro pi:** usa `/sync` normalmente
-- **Da terminale:** puoi usare `node %USERPROFILE%\.pi\agent\git\github.com\<user>\pi-syncro\cli.mjs` o aggiungere la cartella al PATH
+- **Da terminale:** puoi usare `node %USERPROFILE%\.pi\agent\git\github.com\tuouser\pi-syncro\cli.mjs` o aggiungere la cartella al PATH
 
 ## Cosa viene sincronizzato
 
