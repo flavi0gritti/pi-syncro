@@ -249,7 +249,7 @@ function localSettingsPath(): string {
   const h = homedir();
   const p = join(h, ".pi", "agent", "settings.local.json");
   if (process.platform === "win32") {
-    // Su Windows mostra il percorso reale (es. C:\\Users\\Flavio\\.pi\\...)
+    // Su Windows mostra il percorso reale (es. C:\\Users\\NomeUtente\\.pi\\...)
     return p;
   }
   // Su macOS/Linux mostra ~/.pi/agent/settings.local.json
@@ -852,7 +852,7 @@ export default function (pi: ExtensionAPI) {
           if (!extra) {
             ctx.ui.notify(
               "Uso: /sync setup <url>\n\n" +
-              "Esempio: /sync setup https://github.com/flavi0gritti/pi-config.git\n\n" +
+              "Esempio: /sync setup https://github.com/&lt;user&gt;/pi-config.git\n\n" +
               "Il repo deve esistere già su GitHub (pubblico o privato).",
               "error"
             );

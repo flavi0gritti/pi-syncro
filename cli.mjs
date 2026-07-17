@@ -344,7 +344,7 @@ Primo dispositivo:
   pisync push
 
 Altro dispositivo:
-  pi install git:github.com/flavi0gritti/pi-syncro
+  pi install git:github.com/&lt;user&gt;/pi-syncro
   pisync setup https://github.com/user/pi-config.git
   pisync pull
 
