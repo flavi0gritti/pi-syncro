@@ -244,6 +244,18 @@ const LOCAL_SETTINGS_TEMPLATE = `// settings.local.json — configurazione local
 }
 `;
 
+/** Restituisce il percorso di settings.local.json formattato per l'OS corrente */
+function localSettingsPath(): string {
+  const h = homedir();
+  const p = join(h, ".pi", "agent", "settings.local.json");
+  if (process.platform === "win32") {
+    // Su Windows mostra il percorso reale (es. C:\\Users\\Flavio\\.pi\\...)
+    return p;
+  }
+  // Su macOS/Linux mostra ~/.pi/agent/settings.local.json
+  return p.replace(h, "~");
+}
+
 /** Legge settings.local.json strippando i commenti // */
 function loadLocalSettings(): LocalSettings | null {
   if (!existsSync(SETTINGS_LOCAL)) return null;
@@ -768,8 +780,7 @@ export default function (pi: ExtensionAPI) {
               for (const c of localChanges) msg += `\n   ${c}`;
             }
             if (templateCreated) {
-              msg += "\n\n📝 Creato settings.local.json template in ~/.pi/agent/settings.local.json";
-              msg += "\n   Aprilo e configuralo per questa macchina, poi fai /reload.";
+              msg += `\n\n📝 Creato settings.local.json template in:\n   ${localSettingsPath()}\n   Aprilo e configuralo per questa macchina, poi fai /reload.`;
             }
             msg += "\nSe hai nuove estensioni, fai /reload.";
             ctx.ui.notify(msg, "success");
@@ -894,7 +905,8 @@ export default function (pi: ExtensionAPI) {
             if (existsSync(SETTINGS_LOCAL)) {
               const raw = readFileSync(SETTINGS_LOCAL, "utf-8");
               const local = loadLocalSettings();
-              let msg = `🛡️  settings.local.json attuale:\n\n${raw}\n`;
+              let msg = `🛡️  ${localSettingsPath()}`;
+              msg += `\n\n${raw}\n`;
               if (local) {
                 const excluded = local.excludedProviders || [];
                 const dp = local.defaultProvider || "(non impostato)";
@@ -909,10 +921,10 @@ export default function (pi: ExtensionAPI) {
               const created = ensureLocalSettingsTemplate();
               if (created) {
                 ctx.ui.notify(
-                  "📝 Creato settings.local.json template in:\n" +
-                  "   ~/.pi/agent/settings.local.json\n\n" +
-                  "Aprilo e configuralo per questa macchina.\n" +
-                  "Poi fai /reload per applicare.",
+                  `📝 Creato settings.local.json template in:\n` +
+                  `   ${localSettingsPath()}\n\n` +
+                  `Aprilo e configuralo per questa macchina.\n` +
+                  `Poi fai /reload per applicare.`,
                   "success"
                 );
               }
@@ -925,7 +937,7 @@ export default function (pi: ExtensionAPI) {
           if (action === "edit" || action === "open") {
             if (!existsSync(SETTINGS_LOCAL)) ensureLocalSettingsTemplate();
             ctx.ui.notify(
-              `📝 Apri ~/.pi/agent/settings.local.json nel tuo editor.\n` +
+              `📝 Apri ${localSettingsPath()} nel tuo editor.\n` +
               `Dopo averlo modificato, fai /reload.`,
               "info"
             );
@@ -941,7 +953,7 @@ export default function (pi: ExtensionAPI) {
             }
           } else {
             ctx.ui.notify(
-              "/sync local            → mostra settings.local.json attuale\n" +
+              "/sync local            → mostra " + localSettingsPath() + "\n" +
               "/sync local edit       → crea/apri il file per modificarlo\n" +
               "/sync local apply      → ri-applica le regole subito (test)",
               "info"
@@ -1076,7 +1088,7 @@ export default function (pi: ExtensionAPI) {
             `/sync ignore           → gestisci file esclusi dal sync\n` +
             `/sync local            → configura impostazioni locali (per-macchina)\n\n` +
             `💡 Vuoi escludere DeepSeek solo su questa macchina?\n` +
-            `   /sync local edit    → apri settings.local.json e imposta\n` +
+            `   /sync local edit    → apri il file e configuralo\n` +
             `   "excludedProviders": ["deepseek"]`,
             "info"
           );
