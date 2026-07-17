@@ -139,20 +139,51 @@ function cmdSetup(repoUrl) {
 
 async function cmdPush() {
   ensureRepo(); ensureRemote();
-  if (!hasChanges()) { ok('Nessuna modifica da sincronizzare.'); return; }
 
-  log('Modifiche in partenza:');
-  stdout.write(colors.dim + git('status --short') + colors.reset + '\n\n');
+  // Controlla se ci sono commit locali non ancora inviati
+  let ahead = '0';
+  try {
+    git('fetch origin --quiet');
+    ahead = git(`rev-list origin/${BRANCH}..HEAD --count`, { ignoreError: true }) || '0';
+  } catch { /* offline — si prova comunque */ }
 
-  const proceed = await confirm('Inviare queste modifiche?');
-  if (!proceed) { warn('Push annullato.'); return; }
+  if (!hasChanges() && ahead === '0') {
+    ok('Nessuna modifica da sincronizzare.');
+    return;
+  }
 
-  const now = new Date();
-  const ts = now.toISOString().replace('T', ' ').slice(0, 19);
-  const device = `${platform()}-${homedir().split(/[/\\]/).pop()}`;
+  // Se ci sono modifiche nel working tree, le committa
+  if (hasChanges()) {
+    log('Modifiche in partenza:');
+    stdout.write(colors.dim + git('status --short') + colors.reset + '\n\n');
 
-  git('add -A');
-  git(`commit -m "sync: ${ts} [${device}]"`);
+    const proceed = await confirm('Inviare queste modifiche?');
+    if (!proceed) { warn('Push annullato.'); return; }
+
+    const now = new Date();
+    const ts = now.toISOString().replace('T', ' ').slice(0, 19);
+    const device = `${platform()}-${homedir().split(/[/\\]/).pop()}`;
+
+    git('add -A');
+    git(`commit -m "sync: ${ts} [${device}]"`);
+  } else if (ahead !== '0') {
+    log(`${ahead} commit locale(i) non ancora inviato(i) — riprendo il push...`);
+  }
+
+  // 🔄 Integra eventuali modifiche arrivate dal remote (altro dispositivo)
+  try {
+    git('fetch origin --quiet');
+    const behind = git(`rev-list HEAD..origin/${BRANCH} --count`, { ignoreError: true }) || '0';
+    if (behind !== '0') {
+      log(`${behind} commit in arrivo dal remote — integro con rebase...`);
+      git(`pull origin ${BRANCH} --rebase`, { pipe: true });
+    }
+  } catch {
+    warn('Conflitto col remote! Risolvi con: cd ~/.pi/agent && git add . && git rebase --continue');
+    warn('Poi riprova pisync push.');
+    return;
+  }
+
   log('Push in corso...');
   git(`push -u origin ${BRANCH}`, { pipe: true });
   ok('Configurazione sincronizzata su GitHub.');

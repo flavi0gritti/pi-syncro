@@ -13,11 +13,14 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { execSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { homedir, platform } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, copyFileSync, rmSync, readdirSync, statSync, lstatSync } from "node:fs";
+import { homedir, platform, tmpdir } from "node:os";
+import { join, relative, dirname, basename } from "node:path";
 
 const PI_DIR = join(homedir(), ".pi", "agent");
+const SYNCIGNORE = join(PI_DIR, ".syncignore");
+const SETTINGS_LOCAL = join(PI_DIR, "settings.local.json");
+const BACKUP_DIR = join(tmpdir(), "pi-sync-backup");
 const BRANCH = "main";
 
 // ─── Git helpers ─────────────────────────────────────────────────────────────
@@ -49,6 +52,307 @@ function hasLocalChanges(): boolean {
 
 function fetchRemote(): boolean {
   try { git("fetch origin --quiet"); return true; } catch { return false; }
+}
+
+// ─── .syncignore ────────────────────────────────────────────────────────────
+
+/** Legge i pattern da .syncignore (uno per riga, # = commento) */
+function loadSyncIgnore(): string[] {
+  if (!existsSync(SYNCIGNORE)) return [];
+  try {
+    const raw = readFileSync(SYNCIGNORE, "utf-8");
+    return raw
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith("#"));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Espande un pattern .syncignore nella lista di file concreti dentro ~/.pi/agent.
+ * Supporta:
+ *   - nome file esatto: "models-store.json"
+ *   - path relativo: "subdir/file.txt"
+ *   - wildcard shell-style: "*.local.json", "backups/*"
+ */
+function expandPattern(pattern: string): string[] {
+  const results: string[] = [];
+
+  // Se il pattern non contiene wildcard, è un path esatto
+  if (!pattern.includes("*") && !pattern.includes("?") && !pattern.includes("[")) {
+    const full = join(PI_DIR, pattern);
+    if (existsSync(full)) results.push(full);
+    return results;
+  }
+
+  // Per wildcard semplici, usiamo find (disponibile su macOS/Linux/WSL)
+  try {
+    // separiamo directory base dal pattern glob
+    const sep = pattern.includes("/") ? "/" : "";
+    const baseDir = sep ? join(PI_DIR, dirname(pattern)) : PI_DIR;
+    const glob = sep ? basename(pattern) : pattern;
+
+    if (!existsSync(baseDir)) return [];
+
+    // Usiamo un approccio ricorsivo semplice per wildcard * e ?
+    const regex = new RegExp(
+      "^" +
+        glob
+          .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+          .replace(/\*/g, ".*")
+          .replace(/\?/g, ".") +
+        "$"
+    );
+
+    function walk(dir: string) {
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        // Salta file nascosti (tranne quelli esplicitamente matchati)
+        if (entry.startsWith(".") && !pattern.startsWith(".")) continue;
+        const full = join(dir, entry);
+        let stat: ReturnType<typeof lstatSync>;
+        try {
+          stat = lstatSync(full);
+        } catch {
+          continue;
+        }
+        if (stat.isDirectory()) {
+          walk(full);
+        } else if (regex.test(entry)) {
+          results.push(full);
+        }
+      }
+    }
+
+    walk(baseDir);
+  } catch {
+    // fallback: prova come path esatto
+  }
+
+  return results;
+}
+
+/** Restituisce la lista di file locali che matchano .syncignore */
+function getIgnoredFiles(): string[] {
+  const patterns = loadSyncIgnore();
+  if (patterns.length === 0) return [];
+
+  const files = new Set<string>();
+  for (const p of patterns) {
+    for (const f of expandPattern(p)) {
+      files.add(f);
+    }
+  }
+  return Array.from(files);
+}
+
+/** Crea backup dei file ignorati in una directory temporanea */
+function backupIgnoredFiles(): string[] {
+  const files = getIgnoredFiles();
+  if (files.length === 0) return [];
+
+  const backedUp: string[] = [];
+  try {
+    rmSync(BACKUP_DIR, { recursive: true, force: true });
+    mkdirSync(BACKUP_DIR, { recursive: true });
+
+    for (const f of files) {
+      const rel = relative(PI_DIR, f);
+      const dest = join(BACKUP_DIR, rel);
+      try {
+        mkdirSync(dirname(dest), { recursive: true });
+        copyFileSync(f, dest);
+        backedUp.push(f);
+      } catch {
+        // file inesistente o non accessibile — lo saltiamo
+      }
+    }
+  } catch {
+    // se il backup fallisce, torniamo lista vuota (nessun ripristino)
+    return [];
+  }
+  return backedUp;
+}
+
+/** Ripristina i file dal backup temporaneo */
+function restoreIgnoredFiles(): void {
+  if (!existsSync(BACKUP_DIR)) return;
+  try {
+    function walkRestore(dir: string) {
+      let entries: string[];
+      try {
+        entries = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const src = join(dir, entry);
+        const rel = relative(BACKUP_DIR, src);
+        const dest = join(PI_DIR, rel);
+        try {
+          const st = statSync(src);
+          if (st.isDirectory()) {
+            mkdirSync(dest, { recursive: true });
+            walkRestore(src);
+          } else {
+            mkdirSync(dirname(dest), { recursive: true });
+            copyFileSync(src, dest);
+          }
+        } catch {
+          // skip file problematici
+        }
+      }
+    }
+    walkRestore(BACKUP_DIR);
+  } finally {
+    try { rmSync(BACKUP_DIR, { recursive: true, force: true }); } catch { /* cleanup best-effort */ }
+  }
+}
+
+// ─── settings.local.json ────────────────────────────────────────────────────
+
+interface LocalSettings {
+  excludedProviders?: string[];
+  defaultProvider?: string;
+  defaultModel?: string;
+}
+
+/** Template per il file settings.local.json (con commenti //) */
+const LOCAL_SETTINGS_TEMPLATE = `// settings.local.json — configurazione locale per questa macchina
+// Questo file NON viene sincronizzato. Modificalo per adattare pi
+// alla macchina corrente (es. escludere provider non approvati).
+//
+// Ogni volta che fai /sync pull, queste regole vengono applicate
+// automaticamente ai file sincronizzati.
+//
+// Tutti i campi sono opzionali.
+{
+  // Provider da rimuovere su questa macchina (es. ["deepseek"])
+  "excludedProviders": [],
+
+  // Provider e modello predefiniti su questa macchina
+  // (sovrascrive settings.json se il valore sincronizzato è tra gli esclusi)
+  "defaultProvider": "",
+  "defaultModel": ""
+}
+`;
+
+/** Legge settings.local.json strippando i commenti // */
+function loadLocalSettings(): LocalSettings | null {
+  if (!existsSync(SETTINGS_LOCAL)) return null;
+  try {
+    const raw = readFileSync(SETTINGS_LOCAL, "utf-8");
+    // Rimuovi commenti // e righe vuote
+    const cleaned = raw
+      .split("\n")
+      .map((line) => line.replace(/\/\/.*$/, "").trim())
+      .filter((line) => line.length > 0)
+      .join("\n");
+    return JSON.parse(cleaned) as LocalSettings;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Applica le regole di settings.local.json ai file sincronizzati.
+ * Restituisce l'elenco delle modifiche fatte (array di stringhe).
+ */
+function applyLocalSettings(): string[] {
+  const local = loadLocalSettings();
+  if (!local) return [];
+
+  const changes: string[] = [];
+  const excluded = local.excludedProviders || [];
+
+  // 1. Rimuovi provider esclusi da models-store.json
+  const storePath = join(PI_DIR, "models-store.json");
+  if (excluded.length > 0 && existsSync(storePath)) {
+    try {
+      const store = JSON.parse(readFileSync(storePath, "utf-8"));
+      for (const prov of excluded) {
+        if (store[prov]) {
+          delete store[prov];
+          changes.push(`Rimosso provider "${prov}" da models-store.json`);
+        }
+      }
+      writeFileSync(storePath, JSON.stringify(store, null, 2) + "\n");
+    } catch { /* file corrotto, ignora */ }
+  }
+
+  // 2. Correggi settings.json
+  const settingsPath = join(PI_DIR, "settings.json");
+  if (existsSync(settingsPath)) {
+    try {
+      const s = JSON.parse(readFileSync(settingsPath, "utf-8"));
+
+      // defaultProvider: correggi se è tra gli esclusi o se non impostato
+      if (excluded.includes(s.defaultProvider) || (!s.defaultProvider && local.defaultProvider)) {
+        s.defaultProvider = local.defaultProvider || "";
+        changes.push(`defaultProvider → "${s.defaultProvider}"`);
+      }
+
+      // defaultModel: correggi se il provider è tra gli esclusi
+      if (s.defaultModel) {
+        const [prov] = s.defaultModel.split("/");
+        if (excluded.includes(prov)) {
+          s.defaultModel = local.defaultModel || "";
+          changes.push(`defaultModel → "${s.defaultModel}"`);
+        }
+      } else if (local.defaultModel) {
+        s.defaultModel = local.defaultModel;
+        changes.push(`defaultModel → "${s.defaultModel}"`);
+      }
+
+      // enabledModels: rimuovi quelli dei provider esclusi
+      if (s.enabledModels && excluded.length > 0) {
+        const before = s.enabledModels.length;
+        s.enabledModels = s.enabledModels.filter((m: string) => {
+          const [prov] = m.split("/");
+          return !excluded.includes(prov);
+        });
+        const removed = before - s.enabledModels.length;
+        if (removed > 0) changes.push(`Rimossi ${removed} modelli da enabledModels`);
+      }
+
+      writeFileSync(settingsPath, JSON.stringify(s, null, 2) + "\n");
+    } catch { /* file corrotto, ignora */ }
+  }
+
+  // 3. Pulisci auth.json dai provider esclusi (sicurezza)
+  const authPath = join(PI_DIR, "auth.json");
+  if (excluded.length > 0 && existsSync(authPath)) {
+    try {
+      const auth = JSON.parse(readFileSync(authPath, "utf-8"));
+      for (const prov of excluded) {
+        if (auth[prov]) {
+          delete auth[prov];
+          changes.push(`Rimossa api key "${prov}" da auth.json`);
+        }
+      }
+      writeFileSync(authPath, JSON.stringify(auth, null, 2) + "\n");
+    } catch { /* ok */ }
+  }
+
+  return changes;
+}
+
+/** Crea il file settings.local.json template se non esiste */
+function ensureLocalSettingsTemplate(): boolean {
+  if (existsSync(SETTINGS_LOCAL)) return false;
+  try {
+    writeFileSync(SETTINGS_LOCAL, LOCAL_SETTINGS_TEMPLATE, "utf-8");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // ─── Preview per il pull ────────────────────────────────────────────────────
@@ -196,27 +500,88 @@ export default function (pi: ExtensionAPI) {
             ctx.ui.notify("Nessun remote configurato. /sync setup <url>", "error");
             return;
           }
-          if (!hasLocalChanges()) {
+
+          // Controlla se ci sono commit locali non ancora inviati
+          let ahead = "0";
+          try {
+            git("fetch origin --quiet");
+            ahead = gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`) || "0";
+          } catch { /* offline */ }
+
+          if (!hasLocalChanges() && ahead === "0") {
             ctx.ui.notify("✅ Già in sync, nessuna modifica locale.", "info");
             return;
           }
 
-          // Mostra cosa stiamo per inviare
-          const stat = gitQuiet("diff --stat --cached") || gitQuiet("status --short");
-          const ok = await ctx.ui.confirm(
-            "Push su GitHub",
-            `File che verranno inviati:\n\n${stat}\n\nProcedere?`
-          );
-          if (!ok) { ctx.ui.notify("Push annullato.", "info"); return; }
+          // Se ci sono modifiche nel working tree, le committa
+          if (hasLocalChanges()) {
+            const stat = gitQuiet("diff --stat --cached") || gitQuiet("status --short");
+            const ok = await ctx.ui.confirm(
+              "Push su GitHub",
+              `File che verranno inviati:\n\n${stat}\n\nProcedere?`
+            );
+            if (!ok) { ctx.ui.notify("Push annullato.", "info"); return; }
 
-          ctx.ui.notify("Invio in corso...", "info");
-          const now = new Date();
-          const ts = now.toISOString().replace("T", " ").slice(0, 19);
-          const device = `${platform()}-${homedir().split(/[/\\]/).pop()}`;
+            ctx.ui.notify("Invio in corso...", "info");
+
+            // Applica settings.local.json prima del commit (così i provider
+            // esclusi non finiscono nel repo)
+            const localChanges = applyLocalSettings();
+
+            // Backup dei file in .syncignore
+            backupIgnoredFiles();
+
+            const now = new Date();
+            const ts = now.toISOString().replace("T", " ").slice(0, 19);
+            const device = `${platform()}-${homedir().split(/[/\\]/).pop()}`;
+
+            git("add -A");
+
+            // Escludi i file in .syncignore dallo stage
+            const ignored = getIgnoredFiles();
+            for (const f of ignored) {
+              const rel = relative(PI_DIR, f);
+              try { git(`reset -- "${rel}"`); } catch { /* ignora errori */ }
+            }
+
+            // Commit solo se c'è qualcosa in stage
+            const staged = gitQuiet("diff --cached --name-only");
+            if (staged) {
+              git(`commit -m "sync: ${ts} [${device}]"`);
+            } else {
+              ctx.ui.notify("✅ Nessuna modifica da sincronizzare (file in .syncignore esclusi).", "info");
+              restoreIgnoredFiles();
+              return;
+            }
+
+            // Ripristina i file ignorati nel working tree
+            restoreIgnoredFiles();
+          } else if (ahead !== "0") {
+            ctx.ui.notify(`${ahead} commit locale(i) non ancora inviato(i) — riprendo il push...`, "info");
+          }
 
           try {
-            git("add -A");
-            git(`commit -m "sync: ${ts} [${device}]"`);
+            // 🔄 Integra eventuali modifiche arrivate dal remote (altro dispositivo)
+            try {
+              git("fetch origin --quiet");
+              const behind = gitQuiet(`rev-list HEAD..origin/${BRANCH} --count`) || "0";
+              if (behind !== "0") {
+                ctx.ui.notify(`${behind} commit in arrivo — integro con rebase...`, "info");
+                git(`pull origin ${BRANCH} --rebase`);
+              }
+            } catch {
+              ctx.ui.notify(
+                "⚠️ Conflitto col remote!\n" +
+                "Risolvi nel terminale:\n" +
+                "  cd ~/.pi/agent\n" +
+                "  Risolvi i conflitti\n" +
+                "  git add . && git rebase --continue\n" +
+                "Poi riprova /sync push.",
+                "error"
+              );
+              return;
+            }
+
             const pushOut = git(`push -u origin ${BRANCH}`);
             ctx.ui.notify("✅ Configurazione sincronizzata su GitHub.", "success");
           } catch (err: any) {
@@ -306,30 +671,70 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          // Blocca se ci sono modifiche locali
+          // Backup dei file in .syncignore prima del pull
+          const ignoredBeforePull = backupIgnoredFiles();
+          const hasIgnoredBeforePull = ignoredBeforePull.length > 0;
+
+          // Blocca se ci sono modifiche locali (esclusi i file in .syncignore)
           if (hasLocalChanges()) {
-            const discard = await ctx.ui.confirm(
-              "⚠️ Modifiche locali non salvate",
-              "Ci sono modifiche locali. Il pull le sovrascriverebbe.\n\n" +
-              "Fai prima /sync push per salvarle su GitHub,\n" +
-              "oppure conferma qui per SCARTARLE e procedere."
-            );
-            if (!discard) { ctx.ui.notify("Pull annullato.", "info"); return; }
-            try { git("checkout -- ."); gitQuiet("clean -fd"); } catch {}
+            // Se le uniche modifiche sono nei file ignorati, procedi
+            const changes = gitQuiet("status --porcelain");
+            const ignoredRels = new Set(ignoredBeforePull.map((f) => relative(PI_DIR, f)));
+            const nonIgnoredChanges = changes
+              .split("\n")
+              .filter((line) => {
+                const trimmed = line.trim();
+                if (!trimmed) return false;
+                // git status --porcelain format: "XY path" (primi 2 char sono status)
+                const filePath = trimmed.substring(3).trim();
+                return !ignoredRels.has(filePath);
+              })
+              .join("\n")
+              .trim();
+
+            if (nonIgnoredChanges) {
+              const discard = await ctx.ui.confirm(
+                "⚠️ Modifiche locali non salvate",
+                "Ci sono modifiche locali. Il pull le sovrascriverebbe.\n\n" +
+                "Fai prima /sync push per salvarle su GitHub,\n" +
+                "oppure conferma qui per SCARTARLE e procedere."
+              );
+              if (!discard) {
+                restoreIgnoredFiles();
+                ctx.ui.notify("Pull annullato.", "info");
+                return;
+              }
+              try { git("checkout -- ."); gitQuiet("clean -fd"); } catch {}
+            }
           }
 
           // Anteprima di cosa sta per arrivare
           const preview = buildPullPreview();
           if (preview && preview.behind > 0) {
-            let previewMsg = `📥 ${preview.behind} commit in arrivo.\n\n`;
-            const fileSection = formatFileList(preview.files, preview.localEmpty);
+            // Filtra i file in .syncignore dall'anteprima
+            const ignoredSet = new Set(getIgnoredFiles().map((f) => relative(PI_DIR, f)));
+            const filteredFiles = preview.files.filter((f) => !ignoredSet.has(f.path));
+            const filteredCount = preview.files.length - filteredFiles.length;
+
+            let previewMsg = `📥 ${preview.behind} commit in arrivo.`;
+            if (filteredCount > 0) {
+              previewMsg += `\n🔒 ${filteredCount} file in .syncignore (non verranno toccati)`;
+            }
+            previewMsg += "\n\n";
+            const fileSection = formatFileList(filteredFiles, preview.localEmpty);
             if (fileSection) previewMsg += `${fileSection}\n\n`;
+            else if (filteredCount > 0) previewMsg += "(tutti i file in arrivo sono in .syncignore — non verranno applicati)\n\n";
             previewMsg += "Procedere col download?";
 
             const ok = await ctx.ui.confirm("Conferma pull", previewMsg);
-            if (!ok) { ctx.ui.notify("Pull annullato.", "info"); return; }
+            if (!ok) {
+              restoreIgnoredFiles();
+              ctx.ui.notify("Pull annullato.", "info");
+              return;
+            }
           } else if (preview && preview.behind === 0) {
             ctx.ui.notify("✅ Già aggiornato. Nessuna modifica dal remote.", "info");
+            restoreIgnoredFiles();
             return;
           }
 
@@ -344,8 +749,33 @@ export default function (pi: ExtensionAPI) {
             } else {
               const pullOut = git(`pull origin ${BRANCH} --rebase`);
             }
-            ctx.ui.notify("✅ Configurazione aggiornata da GitHub.\nSe hai nuove estensioni, fai /reload.", "success");
+
+            // Ripristina i file ignorati dopo il pull
+            if (hasIgnoredBeforePull) {
+              restoreIgnoredFiles();
+            }
+
+            // Applica settings.local.json
+            const localChanges = applyLocalSettings();
+
+            // Crea il template se non esiste
+            const templateCreated = ensureLocalSettingsTemplate();
+
+            let msg = "✅ Configurazione aggiornata da GitHub.";
+            if (hasIgnoredBeforePull) msg += "\n🔒 File in .syncignore preservati.";
+            if (localChanges.length > 0) {
+              msg += "\n🛡️  settings.local.json:";
+              for (const c of localChanges) msg += `\n   ${c}`;
+            }
+            if (templateCreated) {
+              msg += "\n\n📝 Creato settings.local.json template in ~/.pi/agent/settings.local.json";
+              msg += "\n   Aprilo e configuralo per questa macchina, poi fai /reload.";
+            }
+            msg += "\nSe hai nuove estensioni, fai /reload.";
+            ctx.ui.notify(msg, "success");
           } catch (err: any) {
+            // In caso di errore, ripristina comunque i file ignorati
+            if (hasIgnoredBeforePull) restoreIgnoredFiles();
             ctx.ui.notify(
               `⚠️ Conflitto durante il pull.\n\n` +
               `Risolvi nel terminale:\n` +
@@ -458,6 +888,181 @@ export default function (pi: ExtensionAPI) {
           break;
         }
 
+        // ── local ───────────────────────────────────────────────────────
+        case "local": {
+          if (!extra) {
+            if (existsSync(SETTINGS_LOCAL)) {
+              const raw = readFileSync(SETTINGS_LOCAL, "utf-8");
+              const local = loadLocalSettings();
+              let msg = `🛡️  settings.local.json attuale:\n\n${raw}\n`;
+              if (local) {
+                const excluded = local.excludedProviders || [];
+                const dp = local.defaultProvider || "(non impostato)";
+                const dm = local.defaultModel || "(non impostato)";
+                msg += `\n── Riepilogo ──\n`;
+                msg += `Provider esclusi: ${excluded.length > 0 ? excluded.join(", ") : "(nessuno)"}\n`;
+                msg += `Default provider: ${dp}\n`;
+                msg += `Default model:    ${dm}\n`;
+              }
+              ctx.ui.notify(msg, "info");
+            } else {
+              const created = ensureLocalSettingsTemplate();
+              if (created) {
+                ctx.ui.notify(
+                  "📝 Creato settings.local.json template in:\n" +
+                  "   ~/.pi/agent/settings.local.json\n\n" +
+                  "Aprilo e configuralo per questa macchina.\n" +
+                  "Poi fai /reload per applicare.",
+                  "success"
+                );
+              }
+            }
+            return;
+          }
+
+          const [action, ...restParts] = extra.trim().split(/\s+/);
+
+          if (action === "edit" || action === "open") {
+            if (!existsSync(SETTINGS_LOCAL)) ensureLocalSettingsTemplate();
+            ctx.ui.notify(
+              `📝 Apri ~/.pi/agent/settings.local.json nel tuo editor.\n` +
+              `Dopo averlo modificato, fai /reload.`,
+              "info"
+            );
+          } else if (action === "apply" || action === "test") {
+            const changes = applyLocalSettings();
+            if (changes.length === 0) {
+              ctx.ui.notify("✅ settings.local.json applicato — nessuna modifica necessaria.", "info");
+            } else {
+              let msg = "🛡️  settings.local.json applicato:\n";
+              for (const c of changes) msg += `   ${c}\n`;
+              msg += "\n✅ Configurazione adattata a questa macchina.";
+              ctx.ui.notify(msg, "success");
+            }
+          } else {
+            ctx.ui.notify(
+              "/sync local            → mostra settings.local.json attuale\n" +
+              "/sync local edit       → crea/apri il file per modificarlo\n" +
+              "/sync local apply      → ri-applica le regole subito (test)",
+              "info"
+            );
+          }
+          break;
+        }
+
+        // ── ignore ───────────────────────────────────────────────────────
+        case "ignore": {
+          if (!extra) {
+            const patterns = loadSyncIgnore();
+            if (patterns.length === 0) {
+              ctx.ui.notify(
+                "📛 Nessun pattern in .syncignore.\n\n" +
+                "Usa /sync ignore add <pattern> per aggiungere un file da ignorare.\n" +
+                "I pattern supportano wildcard * e ?\n\n" +
+                "Esempi:\n" +
+                "  /sync ignore add models-store.json\n" +
+                "  /sync ignore add '*.local.json'\n" +
+                "  /sync ignore remove models-store.json\n" +
+                "  /sync ignore list",
+                "info"
+              );
+            } else {
+              const files = getIgnoredFiles();
+              let msg = `📛 Pattern in .syncignore:\n`;
+              for (const p of patterns) {
+                msg += `   ${p}\n`;
+              }
+              if (files.length > 0) {
+                msg += `\n📁 File attualmente ignorati (${files.length}):\n`;
+                for (const f of files) {
+                  msg += `   ${relative(PI_DIR, f)}\n`;
+                }
+              }
+              msg += "\n/sync ignore add <pattern>  → aggiungi\n";
+              msg += "/sync ignore remove <pattern> → rimuovi";
+              ctx.ui.notify(msg, "info");
+            }
+            return;
+          }
+
+          const [action, ...patternParts] = extra.trim().split(/\s+/);
+          const pattern = patternParts.join(" ");
+
+          if (action === "add" || action === "+") {
+            if (!pattern) {
+              ctx.ui.notify("Uso: /sync ignore add <pattern>", "error");
+              return;
+            }
+            const current = loadSyncIgnore();
+            if (current.includes(pattern)) {
+              ctx.ui.notify(`📛 Pattern "${pattern}" già presente in .syncignore.`, "info");
+              return;
+            }
+            const updated = [...current, pattern];
+            try {
+              writeFileSync(SYNCIGNORE, updated.join("\n") + "\n", "utf-8");
+              ctx.ui.notify(
+                `✅ Pattern "${pattern}" aggiunto a .syncignore.\n` +
+                `🔒 I file che matchano questo pattern non verranno sincronizzati.\n` +
+                `⚠️  Ricorda: .syncignore è locale a questa macchina (non viene sincronizzato).`,
+                "success"
+              );
+            } catch (err: any) {
+              ctx.ui.notify(`❌ Errore: ${err.message}`, "error");
+            }
+          } else if (action === "remove" || action === "rm" || action === "-") {
+            if (!pattern) {
+              ctx.ui.notify("Uso: /sync ignore remove <pattern>", "error");
+              return;
+            }
+            const current = loadSyncIgnore();
+            const idx = current.indexOf(pattern);
+            if (idx === -1) {
+              ctx.ui.notify(`📛 Pattern "${pattern}" non trovato in .syncignore.`, "info");
+              return;
+            }
+            const updated = current.filter((_, i) => i !== idx);
+            try {
+              if (updated.length === 0) {
+                unlinkSync(SYNCIGNORE);
+              } else {
+                writeFileSync(SYNCIGNORE, updated.join("\n") + "\n", "utf-8");
+              }
+              ctx.ui.notify(`✅ Pattern "${pattern}" rimosso da .syncignore.`, "success");
+            } catch (err: any) {
+              ctx.ui.notify(`❌ Errore: ${err.message}`, "error");
+            }
+          } else if (action === "list" || action === "ls") {
+            const patterns = loadSyncIgnore();
+            const files = getIgnoredFiles();
+            let msg = "";
+            if (patterns.length === 0) {
+              msg = "📛 Nessun pattern in .syncignore.";
+            } else {
+              msg = `📛 Pattern in .syncignore (${patterns.length}):\n`;
+              for (const p of patterns) {
+                msg += `   ${p}\n`;
+              }
+              if (files.length > 0) {
+                msg += `\n📁 File ignorati (${files.length}):\n`;
+                for (const f of files) {
+                  msg += `   ${relative(PI_DIR, f)}\n`;
+                }
+              }
+            }
+            ctx.ui.notify(msg, "info");
+          } else {
+            ctx.ui.notify(
+              "Uso: /sync ignore [add|remove|list] <pattern>\n\n" +
+              "  add <pattern>     → aggiungi pattern a .syncignore\n" +
+              "  remove <pattern>  → rimuovi pattern da .syncignore\n" +
+              "  list              → mostra pattern e file ignorati",
+              "error"
+            );
+          }
+          break;
+        }
+
         // ── default (help) ────────────────────────────────────────────────
         default:
           ctx.ui.notify(
@@ -467,7 +1072,12 @@ export default function (pi: ExtensionAPI) {
             `/sync status           → stato attuale\n` +
             `/sync log              → storico sync\n` +
             `/sync setup <url>      → collega al repo GitHub\n` +
-            `/sync remote [url]     → mostra o imposta URL remoto`,
+            `/sync remote [url]     → mostra o imposta URL remoto\n` +
+            `/sync ignore           → gestisci file esclusi dal sync\n` +
+            `/sync local            → configura impostazioni locali (per-macchina)\n\n` +
+            `💡 Vuoi escludere DeepSeek solo su questa macchina?\n` +
+            `   /sync local edit    → apri settings.local.json e imposta\n` +
+            `   "excludedProviders": ["deepseek"]`,
             "info"
           );
       }
