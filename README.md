@@ -92,6 +92,7 @@ Una volta installato:
 ### Impostazioni locali per-macchina (`settings.local.json`)
 
 Pi-syncro supporta un file `~/.pi/agent/settings.local.json` (non sincronizzato) che adatta automaticamente la configurazione alla macchina corrente dopo ogni `/sync pull`.
+Quando `excludedProviders` è valorizzato, `settings.json` e `models-store.json` diventano un overlay locale: la loro versione filtrata non viene mai committata né inviata al repository. Il repository conserva sempre la configurazione canonica completa.
 
 **Al primo `/sync pull`** su una macchina nuova, il file viene creato come template:
 
@@ -117,10 +118,11 @@ Poi lo personalizzi. Esempio per escludere DeepSeek e impostare GPT-5.4-mini com
 ```
 
 Dopo ogni `/sync pull`, pi-syncro automaticamente:
-- Rimuove i provider in `excludedProviders` da `models-store.json`
-- Filtra `enabledModels` in `settings.json`
+- Rimuove i provider in `excludedProviders` da `models-store.json` nell'overlay locale
+- Filtra `enabledModels` in `settings.json` nell'overlay locale
 - Corregge `defaultProvider` / `defaultModel` se puntano a provider esclusi
 - Pulisce `auth.json` dalle API key dei provider esclusi
+- Preserva l'overlay locale durante pull e push senza sincronizzarlo
 
 **Comandi:**
 ```

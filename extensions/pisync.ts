@@ -153,9 +153,20 @@ function getIgnoredFiles(): string[] {
   return Array.from(files);
 }
 
-/** Crea backup dei file ignorati in una directory temporanea */
+/**
+ * Restituisce i file che non devono essere sovrascritti o committati durante
+ * un'operazione di sync. Oltre a .syncignore include i file trasformati da
+ * settings.local.json quando la macchina ha provider esclusi.
+ */
+function getProtectedFiles(): string[] {
+  const files = new Set(getIgnoredFiles());
+  for (const f of getLocalOverlayFiles()) files.add(f);
+  return Array.from(files);
+}
+
+/** Crea backup dei file protetti in una directory temporanea */
 function backupIgnoredFiles(): string[] {
-  const files = getIgnoredFiles();
+  const files = getProtectedFiles();
   if (files.length === 0) return [];
 
   const backedUp: string[] = [];
@@ -181,9 +192,39 @@ function backupIgnoredFiles(): string[] {
   return backedUp;
 }
 
-/** Ripristina i file dal backup temporaneo */
-function restoreIgnoredFiles(): void {
+/**
+ * Ripristina i file protetti dalla versione canonica HEAD prima di un pull o
+ * di uno staging. In questo modo Git non vede l'overlay locale come modifica
+ * da sincronizzare e può aggiornare correttamente i file dal remote.
+ */
+function restoreProtectedFilesForSync(files: string[] = getProtectedFiles()): void {
+  for (const f of files) {
+    const rel = relative(PI_DIR, f).replace(/\\/g, "/");
+    try { git(`checkout HEAD -- "${rel}"`); } catch { /* repo vuoto o file non tracciato */ }
+  }
+}
+
+/** Ripristina uno o più file dal backup temporaneo. */
+function restoreIgnoredFiles(files?: string[]): void {
   if (!existsSync(BACKUP_DIR)) return;
+
+  const restoreOne = (file: string) => {
+    const rel = relative(PI_DIR, file);
+    const src = join(BACKUP_DIR, rel);
+    if (!existsSync(src)) return;
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      copyFileSync(src, file);
+    } catch {
+      // skip file problematici
+    }
+  };
+
+  if (files) {
+    for (const file of files) restoreOne(file);
+    return;
+  }
+
   try {
     function walkRestore(dir: string) {
       let entries: string[];
@@ -212,8 +253,12 @@ function restoreIgnoredFiles(): void {
     }
     walkRestore(BACKUP_DIR);
   } finally {
-    try { rmSync(BACKUP_DIR, { recursive: true, force: true }); } catch { /* cleanup best-effort */ }
+    cleanupIgnoredBackup();
   }
+}
+
+function cleanupIgnoredBackup(): void {
+  try { rmSync(BACKUP_DIR, { recursive: true, force: true }); } catch { /* cleanup best-effort */ }
 }
 
 // ─── settings.local.json ────────────────────────────────────────────────────
@@ -274,6 +319,46 @@ function loadLocalSettings(): LocalSettings | null {
 }
 
 /**
+ * I file modificati da excludedProviders sono un overlay per-macchina:
+ * devono essere preservati localmente, ma la loro versione canonica resta
+ * sincronizzata dal repository.
+ */
+function getLocalOverlayFiles(): string[] {
+  const local = loadLocalSettings();
+  if (!local || (local.excludedProviders || []).length === 0) return [];
+
+  return ["settings.json", "models-store.json"]
+    .map((file) => join(PI_DIR, file))
+    .filter((file) => existsSync(file));
+}
+
+function normalizeStatusPath(path: string): string {
+  const unquoted = path.replace(/^"(.*)"$/, "$1");
+  const renamed = unquoted.split(" -> ");
+  return (renamed[renamed.length - 1] || unquoted).replace(/\\/g, "/");
+}
+
+/** Stato Git escludendo overlay locali e file in .syncignore. */
+function getSyncableStatus(): string {
+  const protectedRels = new Set(
+    getProtectedFiles().map((file) => relative(PI_DIR, file).replace(/\\/g, "/"))
+  );
+
+  return gitQuiet("status --porcelain")
+    .split("\n")
+    .filter((line) => {
+      if (!line.trim()) return false;
+      return !protectedRels.has(normalizeStatusPath(line.substring(3).trim()));
+    })
+    .join("\n")
+    .trim();
+}
+
+function hasSyncableChanges(): boolean {
+  return getSyncableStatus().length > 0;
+}
+
+/**
  * Applica le regole di settings.local.json ai file sincronizzati.
  * Restituisce l'elenco delle modifiche fatte (array di stringhe).
  */
@@ -304,17 +389,22 @@ function applyLocalSettings(): string[] {
   if (existsSync(settingsPath)) {
     try {
       const s = JSON.parse(readFileSync(settingsPath, "utf-8"));
+      const originalDefaultProvider = s.defaultProvider;
+      const defaultProviderExcluded = excluded.includes(originalDefaultProvider);
 
       // defaultProvider: correggi se è tra gli esclusi o se non impostato
-      if (excluded.includes(s.defaultProvider) || (!s.defaultProvider && local.defaultProvider)) {
+      if (defaultProviderExcluded || (!s.defaultProvider && local.defaultProvider)) {
         s.defaultProvider = local.defaultProvider || "";
         changes.push(`defaultProvider → "${s.defaultProvider}"`);
       }
 
-      // defaultModel: correggi se il provider è tra gli esclusi
+      // defaultModel: settings.json salva il modello senza provider; quando
+      // manca "provider/", usa quindi il defaultProvider originale.
       if (s.defaultModel) {
-        const [prov] = s.defaultModel.split("/");
-        if (excluded.includes(prov)) {
+        const modelProvider = s.defaultModel.includes("/")
+          ? s.defaultModel.split("/")[0]
+          : originalDefaultProvider;
+        if (excluded.includes(modelProvider)) {
           s.defaultModel = local.defaultModel || "";
           changes.push(`defaultModel → "${s.defaultModel}"`);
         }
@@ -520,60 +610,61 @@ export default function (pi: ExtensionAPI) {
             ahead = gitQuiet(`rev-list origin/${BRANCH}..HEAD --count`) || "0";
           } catch { /* offline */ }
 
-          if (!hasLocalChanges() && ahead === "0") {
+          const syncableChanges = hasSyncableChanges();
+          if (!syncableChanges && ahead === "0") {
             ctx.ui.notify("✅ Già in sync, nessuna modifica locale.", "info");
             return;
           }
 
-          // Se ci sono modifiche nel working tree, le committa
-          if (hasLocalChanges()) {
-            const stat = gitQuiet("diff --stat --cached") || gitQuiet("status --short");
+          // Mostra e conferma solo le modifiche realmente sincronizzabili.
+          // settings.local.json può aver generato un overlay locale nei file
+          // tracciati, ma quell'overlay non deve mai finire nel repository.
+          if (syncableChanges) {
+            const stat = gitQuiet("diff --stat --cached") || getSyncableStatus();
             const ok = await ctx.ui.confirm(
               "Push su GitHub",
               `File che verranno inviati:\n\n${stat}\n\nProcedere?`
             );
             if (!ok) { ctx.ui.notify("Push annullato.", "info"); return; }
-
             ctx.ui.notify("Invio in corso...", "info");
-
-            // Applica settings.local.json prima del commit (così i provider
-            // esclusi non finiscono nel repo)
-            const localChanges = applyLocalSettings();
-
-            // Backup dei file in .syncignore
-            backupIgnoredFiles();
-
-            const now = new Date();
-            const ts = now.toISOString().replace("T", " ").slice(0, 19);
-            const device = `${platform()}-${homedir().split(/[/\\]/).pop()}`;
-
-            git("add -A");
-
-            // Escludi i file in .syncignore dallo stage
-            const ignored = getIgnoredFiles();
-            for (const f of ignored) {
-              const rel = relative(PI_DIR, f);
-              try { git(`reset -- "${rel}"`); } catch { /* ignora errori */ }
-            }
-
-            // Commit solo se c'è qualcosa in stage
-            const staged = gitQuiet("diff --cached --name-only");
-            if (staged) {
-              git(`commit -m "sync: ${ts} [${device}]"`);
-            } else {
-              ctx.ui.notify("✅ Nessuna modifica da sincronizzare (file in .syncignore esclusi).", "info");
-              restoreIgnoredFiles();
-              return;
-            }
-
-            // Ripristina i file ignorati nel working tree
-            restoreIgnoredFiles();
           } else if (ahead !== "0") {
             ctx.ui.notify(`${ahead} commit locale(i) non ancora inviato(i) — riprendo il push...`, "info");
           }
 
+          let protectedBackedUp = false;
+          let syncCompleted = false;
+          const explicitIgnoredBeforePush = getIgnoredFiles();
           try {
-            // 🔄 Integra eventuali modifiche arrivate dal remote (altro dispositivo)
+            // Prima di add/pull rebase rimuove temporaneamente l'overlay
+            // locale. Il backup viene ripristinato nel finally.
+            protectedBackedUp = backupIgnoredFiles().length > 0;
+            if (protectedBackedUp) restoreProtectedFilesForSync();
+
+            if (syncableChanges) {
+              const now = new Date();
+              const ts = now.toISOString().replace("T", " ").slice(0, 19);
+              const device = `${platform()}-${homedir().split(/[/\\]/).pop()}`;
+
+              git("add -A");
+
+              // Escludi sia .syncignore sia i file derivati da settings.local
+              // dallo stage.
+              for (const f of getProtectedFiles()) {
+                const rel = relative(PI_DIR, f).replace(/\\/g, "/");
+                try { git(`reset -- "${rel}"`); } catch { /* ignora errori */ }
+              }
+
+              const staged = gitQuiet("diff --cached --name-only");
+              if (staged) {
+                git(`commit -m "sync: ${ts} [${device}]"`);
+              } else {
+                ctx.ui.notify("✅ Nessuna modifica da sincronizzare (overlay locali esclusi).", "info");
+                return;
+              }
+            }
+
+            // Integra eventuali modifiche arrivate dal remote mentre i file
+            // protetti sono temporaneamente nella versione canonica.
             try {
               git("fetch origin --quiet");
               const behind = gitQuiet(`rev-list HEAD..origin/${BRANCH} --count`) || "0";
@@ -594,10 +685,29 @@ export default function (pi: ExtensionAPI) {
               return;
             }
 
-            const pushOut = git(`push -u origin ${BRANCH}`);
+            git(`push -u origin ${BRANCH}`);
+            syncCompleted = true;
             ctx.ui.notify("✅ Configurazione sincronizzata su GitHub.", "success");
           } catch (err: any) {
             ctx.ui.notify(`❌ Push fallito: ${err.message}`, "error");
+          } finally {
+            if (protectedBackedUp) {
+              if (syncCompleted) {
+                // Dopo il push usa la versione canonica eventualmente
+                // aggiornata dal rebase, poi ricrea l'overlay locale.
+                if (explicitIgnoredBeforePush.length > 0) {
+                  restoreIgnoredFiles(explicitIgnoredBeforePush);
+                }
+                applyLocalSettings();
+                cleanupIgnoredBackup();
+              } else {
+                // In caso di errore non perdere l'overlay precedente.
+                restoreIgnoredFiles();
+                if ((loadLocalSettings()?.excludedProviders || []).length > 0) {
+                  applyLocalSettings();
+                }
+              }
+            }
           }
           break;
         }
@@ -683,22 +793,31 @@ export default function (pi: ExtensionAPI) {
             return;
           }
 
-          // Backup dei file in .syncignore prima del pull
+          // Backup dei file protetti prima del pull. Comprende sia .syncignore
+          // sia l'overlay generato da settings.local.json.
+          const explicitIgnoredBeforePull = getIgnoredFiles();
+          const protectedBeforePull = getProtectedFiles();
           const ignoredBeforePull = backupIgnoredFiles();
           const hasIgnoredBeforePull = ignoredBeforePull.length > 0;
 
-          // Blocca se ci sono modifiche locali (esclusi i file in .syncignore)
+          // Ripristina temporaneamente la versione canonica: altrimenti Git
+          // potrebbe rifiutare il pull perché vede l'overlay come modifica locale.
+          if (protectedBeforePull.length > 0) {
+            restoreProtectedFilesForSync(protectedBeforePull);
+          }
+
+          // Blocca solo le modifiche realmente sincronizzabili.
           if (hasLocalChanges()) {
-            // Se le uniche modifiche sono nei file ignorati, procedi
             const changes = gitQuiet("status --porcelain");
-            const ignoredRels = new Set(ignoredBeforePull.map((f) => relative(PI_DIR, f)));
+            const ignoredRels = new Set(
+              ignoredBeforePull.map((f) => relative(PI_DIR, f).replace(/\\/g, "/"))
+            );
             const nonIgnoredChanges = changes
               .split("\n")
               .filter((line) => {
-                const trimmed = line.trim();
-                if (!trimmed) return false;
+                if (!line.trim()) return false;
                 // git status --porcelain format: "XY path" (primi 2 char sono status)
-                const filePath = trimmed.substring(3).trim();
+                const filePath = normalizeStatusPath(line.substring(3).trim());
                 return !ignoredRels.has(filePath);
               })
               .join("\n")
@@ -723,8 +842,10 @@ export default function (pi: ExtensionAPI) {
           // Anteprima di cosa sta per arrivare
           const preview = buildPullPreview();
           if (preview && preview.behind > 0) {
-            // Filtra i file in .syncignore dall'anteprima
-            const ignoredSet = new Set(getIgnoredFiles().map((f) => relative(PI_DIR, f)));
+            // Filtra i file protetti dall'anteprima
+            const ignoredSet = new Set(
+              getProtectedFiles().map((f) => relative(PI_DIR, f).replace(/\\/g, "/"))
+            );
             const filteredFiles = preview.files.filter((f) => !ignoredSet.has(f.path));
             const filteredCount = preview.files.length - filteredFiles.length;
 
@@ -762,19 +883,22 @@ export default function (pi: ExtensionAPI) {
               const pullOut = git(`pull origin ${BRANCH} --rebase`);
             }
 
-            // Ripristina i file ignorati dopo il pull
-            if (hasIgnoredBeforePull) {
-              restoreIgnoredFiles();
+            // Ripristina solo i file esplicitamente presenti in .syncignore.
+            // I file dell'overlay locale, invece, devono partire dalla nuova
+            // versione canonica appena scaricata e venire filtrati dopo.
+            if (explicitIgnoredBeforePull.length > 0) {
+              restoreIgnoredFiles(explicitIgnoredBeforePull);
             }
 
-            // Applica settings.local.json
+            // Applica settings.local.json alla versione canonica aggiornata.
             const localChanges = applyLocalSettings();
+            cleanupIgnoredBackup();
 
             // Crea il template se non esiste
             const templateCreated = ensureLocalSettingsTemplate();
 
             let msg = "✅ Configurazione aggiornata da GitHub.";
-            if (hasIgnoredBeforePull) msg += "\n🔒 File in .syncignore preservati.";
+            if (hasIgnoredBeforePull) msg += "\n🔒 File locali protetti preservati.";
             if (localChanges.length > 0) {
               msg += "\n🛡️  settings.local.json:";
               for (const c of localChanges) msg += `\n   ${c}`;
@@ -785,8 +909,9 @@ export default function (pi: ExtensionAPI) {
             msg += "\nSe hai nuove estensioni, fai /reload.";
             ctx.ui.notify(msg, "success");
           } catch (err: any) {
-            // In caso di errore, ripristina comunque i file ignorati
+            // In caso di errore, ripristina comunque tutti i file protetti.
             if (hasIgnoredBeforePull) restoreIgnoredFiles();
+            else cleanupIgnoredBackup();
             ctx.ui.notify(
               `⚠️ Conflitto durante il pull.\n\n` +
               `Risolvi nel terminale:\n` +
@@ -824,11 +949,14 @@ export default function (pi: ExtensionAPI) {
             msg += "\n⚠️ Nessun remote. Esegui /sync setup <url>";
           }
 
-          const changes = gitQuiet("status --porcelain");
+          const changes = getSyncableStatus();
           if (changes) {
-            msg += `\n\n📝 Modifiche locali:\n${gitQuiet("status --short")}`;
+            msg += `\n\n📝 Modifiche locali sincronizzabili:\n${changes}`;
           } else {
             msg += "\n📝 Working tree pulito";
+          }
+          if (getLocalOverlayFiles().length > 0) {
+            msg += "\n🛡️ Overlay locale attivo (non verrà sincronizzato)";
           }
 
           ctx.ui.notify(msg, "info");
