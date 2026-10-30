@@ -1,6 +1,7 @@
 {
   "name": "pi-syncro",
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "scripts": { "test": "node --test test/*.test.mjs" },
   "description": "Sync pi coding agent configuration across devices via GitHub. Provides /sync commands inside pi and a standalone CLI.",
   "keywords": ["pi-coding-agent", "pi-extension", "sync", "config"],
   "license": "MIT",
@@ -10,6 +11,7 @@
   "files": [
     "extensions/",
     "cli.mjs",
+    "sync-core.mjs",
     "README.md"
   ]
 }

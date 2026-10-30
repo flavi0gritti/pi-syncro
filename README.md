@@ -1,113 +1,49 @@
 # pi-syncro
 
-Sync della configurazione di [pi coding agent](https://github.com/earendil-works/pi) tra dispositivi (macOS, Linux, Windows) tramite GitHub.
+Sincronizza `~/.pi/agent` tramite Git, su Windows, macOS e Linux.
 
-## Installazione (qualsiasi OS)
-
-```bash
+```sh
 pi install git:github.com/flavi0gritti/pi-syncro
 ```
 
-Funziona ovunque: macOS, Linux, Windows (PowerShell, CMD, Git Bash, WSL).
+## Regola di sicurezza
 
-## Utilizzo dentro pi
+**Prima leggi, poi confermi, solo dopo si modifica.** Un push non riscrive mai i file locali. Non vengono eseguiti rebase automatici, `git clean`, checkout forzati o scarti delle modifiche.
 
-Una volta installato, hai i comandi `/sync`:
+## Comandi dentro Pi
 
-| Comando | Descrizione |
-|---------|-------------|
-| `/sync setup <url>` | Collega la config al repo GitHub |
-| `/sync push` | Carica la config su GitHub |
-| `/sync pull` | Scarica la config da GitHub (con anteprima e conferma) |
-| `/sync diff` | **Anteprima:** cosa cambierebbe col pull, senza applicare |
-| `/sync status` | Stato: modifiche locali, differenze col remote |
-| `/sync log` | Storico degli ultimi 20 sync |
-| `/sync remote [url]` | Mostra o imposta l'URL del remote |
+| Comando | Azione |
+| --- | --- |
+| `/sync setup <url>` | Collega il repository della configurazione; non scarica né invia file |
+| `/sync push` | Anteprima di ciò che cambia su GitHub, poi conferma |
+| `/sync pull` | Anteprima di ciò che cambia sul PC, poi conferma |
+| `/sync diff push` | Solo anteprima del push |
+| `/sync diff pull` (o `/sync diff`) | Solo anteprima del pull |
+| `/sync status` | Stato Git locale |
+| `/sync log` | Ultimi 20 commit locali |
+| `/sync remote` | Mostra il remote |
+| `/sync local` | Mostra percorso e provider esclusi; crea un template se manca |
+| `/sync ignore [add\|remove\|list] [pattern]` | Gestisce `.syncignore` locale |
 
-## CLI standalone (terminale, senza pi)
+L’anteprima si apre in un editor scorrevole. Il testo è un rapporto, **non un piano modificabile**: cambiarlo non cambia le operazioni. Esc annulla; chiudere normalmente porta a una seconda conferma. La versione effettiva approvata viene verificata prima di applicarla: se file, indice, preferenze locali o GitHub sono cambiati, occorre una nuova anteprima.
 
-```bash
-# macOS / Linux / Git Bash / WSL
-pisync push | pull | diff | status | log | setup | remote
+Sono mostrati aggiunte, modifiche e rimozioni dei file. Per `settings.json`, anche i cambiamenti alle singole impostazioni e ai pacchetti. I valori non pubblici vengono nascosti; negli altri JSON vengono mostrati i percorsi dei campi aggiunti, rimossi o modificati. Per gli altri file si mostra un riepilogo in byte, **non il diff completo del contenuto**, per non stampare credenziali. Nessun invio in modalità non interattiva.
 
-# Windows PowerShell
-.\pisync.ps1 push | pull | diff | status | log | setup | remote
-```
+`diff <nome-file>` non è più supportato: usa `diff push` o `diff pull`.
 
-Il comando `pisync` funziona aggiungendo la cartella del pacchetto al PATH:
+## Cosa succede se i due computer hanno modifiche?
 
-**macOS / Linux:**
-```bash
-echo 'export PATH="$HOME/.pi/agent/git/github.com/flavi0gritti/pi-syncro:$PATH"' >> ~/.zshrc
-```
+- **Push con novità remote:** si ferma e chiede di controllare prima il pull. Non mescola le versioni di nascosto.
+- **Pull con modifiche locali su file diversi:** conserva le modifiche locali e applica quelle remote mostrate.
+- **Pull con modifiche locali e remote sullo stesso file:** si ferma senza modificare file. La prima versione è volutamente prudente: niente fusione automatica nemmeno tra due campi dello stesso JSON. Conserva una copia delle modifiche e risolvi manualmente il conflitto prima di riprovare.
+- **Storie Git divergenti o commit locali durante il pull:** richiedono una risoluzione Git manuale.
+- File già nello stage, operazioni Git incomplete, branch diversi da `main`, link simbolici e submodule bloccano la sincronizzazione.
 
-**Windows PowerShell (profilo):**
-```powershell
-$pkg = "$env:USERPROFILE\.pi\agent\git\github.com\tuouser\pi-syncro"
-[Environment]::SetEnvironmentVariable("Path", "$pkg;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")
-```
+Il fetch aggiorna metadati e riferimenti remoti Git anche durante un’anteprima; non modifica le impostazioni né il working tree. Git deve essere configurato con nome/email e accesso al remote.
 
-## Setup primo dispositivo
+## Preferenze di questo PC
 
-**1. Crea un repo su GitHub** (pubblico o privato) per la tua config pi.
-   Esempio: `https://github.com/tuouser/pi-config`
-   Non serve inizializzarlo con README o .gitignore — pi-syncro fa tutto da solo.
-
-**2. Dentro pi:**
-```
-/sync setup https://github.com/tuouser/pi-config.git
-/sync push
-```
-
-## Setup secondo dispositivo (Windows incluso)
-
-```
-pi install git:github.com/flavi0gritti/pi-syncro   # se non ancora installato
-```
-
-Dentro pi:
-
-```
-/sync setup https://github.com/tuouser/pi-config.git
-/sync diff        → anteprima di cosa arriva
-/sync pull        → applica
-```
-
-## Windows — nota importante
-
-Su Windows, l'installazione è identica. `pi install git:...` funziona nativamente.
-Una volta installato:
-
-- **Dentro pi:** usa `/sync` normalmente
-- **Da terminale:** puoi usare `node %USERPROFILE%\.pi\agent\git\github.com\tuouser\pi-syncro\cli.mjs` o aggiungere la cartella al PATH
-
-## Cosa viene sincronizzato
-
-`settings.json` · `keybindings.json` · `models.json` · `themes/` · `extensions/*.ts, *.json` · `skills/` · `pi-info.json`
-
-## Cosa NON viene sincronizzato
-
-`auth.json` (API key) · `sessions/` · `npm/` · `tmp/` · `bin/`
-
-### Impostazioni locali per-macchina (`settings.local.json`)
-
-Pi-syncro supporta un file `~/.pi/agent/settings.local.json` (non sincronizzato) che adatta automaticamente la configurazione alla macchina corrente dopo ogni `/sync pull`.
-Quando `excludedProviders` è valorizzato, `settings.json` e `models-store.json` diventano un overlay locale: la loro versione filtrata non viene mai committata né inviata al repository. Il repository conserva sempre la configurazione canonica completa.
-
-**Al primo `/sync pull`** su una macchina nuova, il file viene creato come template:
-
-```json
-// settings.local.json — configurazione locale per questa macchina
-// Questo file NON viene sincronizzato. Modificalo per adattare pi
-// alla macchina corrente (es. escludere provider non approvati).
-{
-  "excludedProviders": [],
-  "defaultProvider": "",
-  "defaultModel": ""
-}
-```
-
-Poi lo personalizzi. Esempio per escludere DeepSeek e impostare GPT-5.4-mini come default:
+Crea/modifica `~/.pi/agent/settings.local.json`:
 
 ```json
 {
@@ -117,55 +53,59 @@ Poi lo personalizzi. Esempio per escludere DeepSeek e impostare GPT-5.4-mini com
 }
 ```
 
-Dopo ogni `/sync pull`, pi-syncro automaticamente:
-- Rimuove i provider in `excludedProviders` da `models-store.json` nell'overlay locale
-- Filtra `enabledModels` in `settings.json` nell'overlay locale
-- Corregge `defaultProvider` / `defaultModel` se puntano a provider esclusi
-- Pulisce `auth.json` dalle API key dei provider esclusi
-- Preserva l'overlay locale durante pull e push senza sincronizzarlo
+Sono ammessi commenti `//` su righe separate. JSON errato blocca l’operazione, non viene ignorato.
 
-**Comandi:**
-```
-/sync local            → mostra il contenuto di settings.local.json
-/sync local edit       → crea/apri il file per modificarlo
-/sync local apply      → ri-applica le regole subito (per test)
-```
+Il filtro riguarda soltanto i provider in `models-store.json` e i campi `enabledModels`, `defaultProvider`, `defaultModel` in `settings.json`:
 
-**Esempio pratico — DeepSeek solo su Mac personale:**
+- **Push:** ricostruisce questi soli valori dalla base canonica Git in un indice temporaneo. Tema, pacchetti e altre preferenze aggiornate vengono sincronizzati normalmente. I file sul PC restano byte per byte invariati.
+- **Pull:** filtra i nuovi valori prima dell’anteprima. La versione canonica completa resta in Git.
+- Le API key locali non vengono cancellate o riscritte dal filtro.
 
-Sul **PC Windows da lavoro**:
-```
-/sync local edit
-```
-Imposti `"excludedProviders": ["deepseek"]`, `"defaultProvider": "openai-codex"`, `"defaultModel": "gpt-5.4-mini"`, salvi e fai `/reload`. Fine.
+Per applicare inizialmente un filtro a una configurazione già locale, adegua quei campi manualmente. `/sync local apply` e `test` non riscrivono più i file: il filtro viene applicato ai file in arrivo con un pull confermato. Non viene creato automaticamente un template durante un pull.
 
-Sul **Mac personale**: nessun `settings.local.json` → DeepSeek rimane attivo.
+Per escludere file interi, usa `.syncignore`, un pattern per riga (`*`, `?`, percorsi relativi; commenti su righe separate). Ad esempio:
 
-**Se cambi PC lavoro in futuro:**
-- Sul nuovo PC, dopo il primo `/sync pull` verrà creato automaticamente un nuovo template
-- Lo personalizzi di nuovo con gli stessi valori (o con valori diversi per quella macchina)
-- Niente copia-incolla: ogni macchina ha il suo `settings.local.json` indipendente
-
-### Esclusioni per-macchina (`.syncignore`)
-
-Per escludere interi file dalla sincronizzazione (non solo provider, ma qualsiasi file), usa `.syncignore`:
-
-```bash
-# In ~/.pi/agent/.syncignore:
-models-store.json        # mantieni modelli locali diversi
-*.local.json             # tutti i file .local.json
-themes/custom-theme.json # un tema specifico
+```text
+models-store.json
+*.local.json
+themes/custom-theme.json
 ```
 
-Comandi:
-```
-/sync ignore add models-store.json
-/sync ignore list
-/sync ignore remove models-store.json
+I file esclusi restano invariati sia localmente sia sul remoto. Per rimuovere dal remoto un file escluso, serve un’operazione Git esplicita.
+
+## Credenziali e backup
+
+`auth.json`, `mcp-auth.json`, `settings.local.json`, `.syncignore`, file `.env*`, percorsi con nomi di credenziali/segreti/token/chiavi private e directory rigenerabili (`sessions`, `git`, `npm`, `bin`, `backups`, `tmp`) sono esclusi automaticamente. Vengono inoltre bloccati i JSON contenenti campi non vuoti come `apiKey`, `Authorization`, `password`, `accessToken`, `refreshToken`, `clientSecret`, `privateKey` o `cookie`, anche nei commit locali non pubblicati. Il controllo è prudente e può bloccare anche riferimenti a variabili d’ambiente in quei campi. **Non è uno scanner completo di segreti**: non inserire credenziali dentro altri file sincronizzati. Usa `.gitignore` e `.syncignore` e controlla i file prima di sincronizzarli.
+
+Se file privati erano già tracciati, il push ne propone la rimozione dalla versione corrente su GitHub, senza cancellare la copia locale. Se commit locali non ancora pubblicati contengono file privati, il push viene bloccato: rimuoverli dall’ultimo albero non basta, bisogna ripulire la cronologia. **Segreti già pubblicati restano nei vecchi commit: revocali e ripulisci la cronologia separatamente.**
+
+Prima di applicare un piano si crea un backup con permessi restrittivi in:
+
+```text
+~/.pi/agent/.git/pi-sync-backups/<data-id>/
+  manifest.json  # HEAD precedente e lista file
+  files/         # copie locali prima dell’operazione
 ```
 
-A differenza di `settings.local.json` (che applica regole dopo il pull), `.syncignore` impedisce proprio che i file vengano toccati da push e pull.
+Il percorso viene comunicato al termine. Il backup può contenere dati privati: non condividerlo. Per annullare manualmente, chiudi Pi, conserva anche lo stato attuale, poi ripristina i file desiderati da `files/` e usa il manifest per individuare file aggiunti dall’operazione. La cronologia non viene resettata automaticamente: se necessario chiedi assistenza Git. Un push remoto già riuscito non viene annullato da un errore successivo locale.
 
-**Quando usare cosa:**
-- `settings.local.json` → per adattare i file sincronizzati (es. escludere un provider)
-- `.syncignore` → per bloccare del tutto la sincronizzazione di certi file
+Un lock impedisce due operazioni di pi-syncro contemporanee. Non protegge contro programmi esterni che scrivono file durante l’applicazione: esegui il sync quando Pi e gli altri programmi non stanno cambiando le impostazioni. Se il processo termina bruscamente, controlla backup e stato Git prima di rimuovere l’eventuale `.git/pi-sync.lock` rimasto.
+
+## CLI
+
+Usa lo stesso motore e le stesse protezioni dell’estensione:
+
+```sh
+node ~/.pi/agent/git/github.com/flavi0gritti/pi-syncro/cli.mjs diff push
+node ~/.pi/agent/git/github.com/flavi0gritti/pi-syncro/cli.mjs push
+```
+
+Su PowerShell usa `~` oppure `$env:USERPROFILE` e il launcher `pisync.ps1`. Comandi CLI: `push`, `pull`, `diff [push|pull]`, `status`, `log`, `setup <url>`, `remote`.
+
+## Test
+
+```sh
+npm test
+```
+
+I test usano repository Git temporanei locali, non il repository delle impostazioni né GitHub.
