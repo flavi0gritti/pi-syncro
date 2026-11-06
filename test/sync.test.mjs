@@ -1,30 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { createSync } from '../sync-core.mjs';
-
-const enc = o => JSON.stringify(o, null, 2) + '\n';
-function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), 'pi-sync-test-'));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const remote = join(root, 'remote.git'), a = join(root, 'a'), b = join(root, 'b');
-  const git = (dir, ...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-  mkdirSync(a);
-  git(root, 'init', '--bare', remote);
-  git(a, 'init', '-b', 'main');
-  const identity = dir => { git(dir, 'config', 'user.name', 'Test'); git(dir, 'config', 'user.email', 'test@example.invalid'); git(dir, 'config', 'core.autocrlf', 'false'); };
-  identity(a);
-  git(a, 'remote', 'add', 'origin', remote);
-  const original = { theme: 'old', packages: ['sync'], enabledModels: ['deepseek/one', 'openai/one'], defaultProvider: 'deepseek', defaultModel: 'one' };
-  writeFileSync(join(a, 'settings.json'), enc(original));
-  writeFileSync(join(a, 'models-store.json'), enc({ deepseek: { model: 1 }, openai: { model: 2 } }));
-  git(a, 'add', '.'); git(a, 'commit', '-m', 'initial'); git(a, 'push', '-u', 'origin', 'main');
-  git(root, '-c', 'core.autocrlf=false', 'clone', '-b', 'main', remote, b); identity(b);
-  return { root, remote, a, b, git, original, sync: createSync(a) };
-}
+import { fixture, enc } from './fixture.mjs';
 function localOverlay(f) {
   writeFileSync(join(f.a, 'settings.local.json'), enc({ excludedProviders: ['deepseek'], defaultProvider: 'openai', defaultModel: 'one' }));
   writeFileSync(join(f.a, 'settings.json'), enc({ ...f.original, theme: 'system', packages: ['sync', 'git:github.com/test/picker', 'git:github.com/test/cc-tools'], enabledModels: ['openai/one'], defaultProvider: 'openai' }));
@@ -61,20 +39,23 @@ test('pull previews additions/removals, preserves unrelated local changes and se
   const before = readFileSync(join(f.a, 'settings.json'));
   const plan = f.sync.prepare('pull');
   assert.match(f.sync.preview(plan), /\+ new.txt/);
-  assert.match(f.sync.preview(plan), /- models-store.json/);
+  assert.doesNotMatch(f.sync.preview(plan), /- models-store.json/);
   assert.equal(existsSync(join(f.a, 'new.txt')), false);
   f.sync.apply(plan);
   assert.deepEqual(readFileSync(join(f.a, 'settings.json')), before);
   assert.equal(readFileSync(join(f.a, 'auth.json'), 'utf8'), 'SECRET');
   assert.equal(readFileSync(join(f.a, 'new.txt'), 'utf8'), 'new');
+  assert.equal(readFileSync(join(f.a, 'models-store.json'), 'utf8'), enc({ openai: { model: 2 } }));
 });
 
-test('pull refuses overlapping local/remote edits, without deleting anything', t => {
+test('pull reports true field conflicts and refuses applying unresolved choices', t => {
   const f = fixture(t); localOverlay(f);
   writeFileSync(join(f.b, 'settings.json'), enc({ ...f.original, theme: 'remote' }));
   f.git(f.b, 'add', '.'); f.git(f.b, 'commit', '-m', 'remote'); f.git(f.b, 'push');
   const before = readFileSync(join(f.a, 'settings.json'));
-  assert.throws(() => f.sync.prepare('pull'), /stessi file/);
+  const plan = f.sync.prepare('pull');
+  assert.deepEqual(plan.conflicts.map(c => c.path), [['theme']]);
+  assert.throws(() => f.sync.apply(plan), /non risolti/);
   assert.deepEqual(readFileSync(join(f.a, 'settings.json')), before);
 });
 
@@ -108,11 +89,13 @@ test('remote changes after approval invalidate plan', t => {
 
 test('syncignore preserves local and remote file independently', t => {
   const f = fixture(t);
-  writeFileSync(join(f.a, '.syncignore'), 'models-store.json\n');
-  writeFileSync(join(f.a, 'models-store.json'), 'LOCAL');
+  writeFileSync(join(f.a, 'custom-cache.json'), 'REMOTE');
+  f.git(f.a, 'add', 'custom-cache.json'); f.git(f.a, 'commit', '-m', 'shared custom file'); f.git(f.a, 'push');
+  writeFileSync(join(f.a, '.syncignore'), 'custom-cache.json\n');
+  writeFileSync(join(f.a, 'custom-cache.json'), 'LOCAL');
   const plan = f.sync.prepare('push'); f.sync.apply(plan);
-  assert.equal(readFileSync(join(f.a, 'models-store.json'), 'utf8'), 'LOCAL');
-  assert.notEqual(f.git(f.a, 'show', 'HEAD:models-store.json'), 'LOCAL');
+  assert.equal(readFileSync(join(f.a, 'custom-cache.json'), 'utf8'), 'LOCAL');
+  assert.equal(f.git(f.a, 'show', 'HEAD:custom-cache.json'), 'REMOTE');
 });
 
 test('CRLF checkout is not treated as a conflicting settings edit', t => {
@@ -137,8 +120,14 @@ test('private untracked files never enter push tree or preview values', t => {
 
 test('inline JSON credentials block push without displaying their values', t => {
   const f = fixture(t);
-  writeFileSync(join(f.a, 'mcp.json'), enc({ mcpServers: { test: { headers: { Authorization: 'VERY_PRIVATE' } } } }));
-  assert.throws(() => f.sync.prepare('push'), error => /credenziali inline/.test(error.message) && !error.message.includes('VERY_PRIVATE'));
+  for (const config of [
+    { headers: { Authorization: 'VERY_PRIVATE' } },
+    { env: { GITHUB_TOKEN: 'VERY_PRIVATE' } },
+    { url: 'https://VERY_PRIVATE@example.invalid/path' },
+  ]) {
+    writeFileSync(join(f.a, 'mcp.json'), enc({ mcpServers: { test: config } }));
+    assert.throws(() => f.sync.prepare('push'), error => /credenziali inline/.test(error.message) && !error.message.includes('VERY_PRIVATE'));
+  }
 });
 
 test('unpublished private commit blocks push even if a later tree removes it', t => {
