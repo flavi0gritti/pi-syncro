@@ -9,11 +9,15 @@ export async function runSync(sync, direction, ui) {
     plan = sync.resolve(plan, { [conflict.id]: choice });
   }
   if (!plan.changes.length && plan.head === plan.remote) {
-    ui.notify(['Nessuna differenza.', ...(plan.notes || [])].join('\n')); return false;
+    ui.notify(['Nessuna differenza.', ...(plan.notes || [])].join('\n'));
+    if (direction === 'pull') await ui.packages?.();
+    return false;
   }
   if (!await ui.review(plan)) return false;
   const backup = sync.apply(plan);
-  ui.notify(`Operazione completata. Backup locale: ${backup}\nEsegui /reload se sono cambiate risorse o impostazioni.`);
+  ui.notify(`Operazione completata. Backup locale: ${backup}`);
+  if (direction === 'pull' && ui.packages) await ui.packages();
+  else ui.notify('Esegui /reload se sono cambiate risorse o impostazioni.');
   return true;
 }
 

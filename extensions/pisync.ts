@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { createSync } from '../sync-core.mjs';
 import { buildDiffFiles, redact } from '../diff-view.mjs';
 import { runSync, runLocal, runIgnore } from '../commands.mjs';
+import { runPackages } from '../packages.mjs';
 import { createDiffScreen } from './diff-screen.js';
 
 export default function (pi: ExtensionAPI) {
@@ -13,6 +14,7 @@ export default function (pi: ExtensionAPI) {
       const [command = 'help', ...rest] = args.trim().split(/\s+/);
       const dir = getAgentDir(), sync = createSync(dir);
       const ui = {
+        packages: () => runPackages(dir, ui),
         notify: (message: string) => ctx.ui.notify(message, 'info'),
         input: (title: string) => ctx.ui.input(title),
         async choose(title: string, choices: { label: string; value: any }[]) {
@@ -36,9 +38,10 @@ export default function (pi: ExtensionAPI) {
       };
       try {
         if (['diff', 'preview', 'dry-run'].includes(command)) throw new Error('Usa /sync push o /sync pull: il confronto è già incluso, prima della conferma.');
-        if (['push', 'upload', 'pull', 'download', 'local'].includes(command)) {
+        if (['push', 'upload', 'pull', 'download', 'local', 'packages'].includes(command)) {
           if (!ctx.hasUI || ctx.mode !== 'tui') throw new Error('Serve la UI interattiva di Pi per esaminare e confermare il confronto.');
-          if (command === 'local') await runLocal(sync, rest, ui);
+          if (command === 'packages') await runPackages(dir, ui);
+          else if (command === 'local') await runLocal(sync, rest, ui);
           else await runSync(sync, command === 'push' || command === 'upload' ? 'push' : 'pull', ui);
           return;
         }
@@ -61,7 +64,7 @@ export default function (pi: ExtensionAPI) {
           if (!ctx.hasUI || ctx.mode !== 'tui') throw new Error('Serve la UI interattiva di Pi per gestire le esclusioni.');
           await runIgnore(sync, rest, ui);
         } else {
-          ctx.ui.notify('/sync push | pull | status | log\n/sync setup <url> | remote\n/sync local → menu guidato delle eccezioni\n/sync ignore [add|remove|list] [pattern]\nNessun rebase o scarto automatico. Solo i veri conflitti richiedono una scelta.', 'info');
+          ctx.ui.notify('/sync push | pull | packages | status | log\n/sync setup <url> | remote\n/sync local → menu guidato delle eccezioni\n/sync ignore [add|remove|list] [pattern]\nNessun rebase o scarto automatico. Solo i veri conflitti richiedono una scelta.', 'info');
         }
       } catch (error) {
         ctx.ui.notify(error instanceof Error && !('stderr' in error) ? error.message : 'Operazione Git fallita. Nessuno scarto automatico. Controlla connessione, permessi e stato Git.', 'error');

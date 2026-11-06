@@ -20,6 +20,7 @@
     "merge.mjs",
     "local-rules.mjs",
     "commands.mjs",
+    "packages.mjs",
     "README.md"
   ]
 }

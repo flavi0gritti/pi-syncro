@@ -29,6 +29,20 @@ I JSON sono formattati per leggibilità: i numeri di riga si riferiscono a quest
 
 I comandi `diff`, `preview` e `dry-run` sono rimossi: il confronto è incluso in push e pull. La schermata grafica richiede la modalità interattiva TUI; la CLI offre gli stessi flussi in testo.
 
+## Scaricare i pacchetti dopo un pull
+
+La lista `packages` viaggia in `settings.json`, ma le directory `git/` e `npm/` no: ogni PC deve scaricare le proprie copie. Dopo un pull confermato (anche senza differenze), pi-syncro propone di **installare i pacchetti mancanti**, prima del reload. Serve una conferma separata perché le sorgenti condivise possono contenere codice eseguibile.
+
+Usa `/sync packages` per riprovare, oppure `node cli.mjs packages` nella CLI. Il gestore nativo di Pi rispetta sorgenti Git/npm, versioni npm fissate e filtri degli oggetti `packages`; legge la configurazione risultante dalle eccezioni locali, senza riscriverla. Non aggiorna indiscriminatamente le estensioni Git già installate. Per aggiornare i pacchetti esistenti usa `pi update --extensions` nel terminale.
+
+La riconciliazione ha un limite di due minuti. Un errore, la modalità offline o un timeout **non annullano il pull già applicato**: le installazioni possono essere parziali; riprova prima di ricaricare Pi. Non vengono mostrati output dei processi o credenziali. Per il recupero manuale, ad esempio:
+
+```sh
+pi install git:github.com/flavi0gritti/pi-config
+```
+
+I percorsi locali non sono scaricabili: devi copiarli sul nuovo PC, sostituirli con una sorgente Git/npm oppure escluderli con una regola locale. La funzione richiede il runtime Node e l’SDK di Pi installato; se non vengono trovati, usa `pi install <sorgente>` dal terminale.
+
 ## Quando un computer resta indietro
 
 Il pull confronta **l’ultima versione condivisa accettata (HEAD), le modifiche attuali del PC e GitHub**. Essere rimasti indietro di molti push non è un conflitto.

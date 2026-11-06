@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createSync } from './sync-core.mjs';
+import { runPackages } from './packages.mjs';
 import { runSync, runLocal, runIgnore, terminalUI, localUsage } from './commands.mjs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -16,6 +17,8 @@ export async function runCli(argv, { dir, ui } = {}) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try { return await rl.question(question); } finally { rl.close(); }
   }, message => console.log(message));
+  ui.packages ||= () => runPackages(root, ui);
+  if (command === 'packages') return runPackages(root, ui);
   if (['diff', 'preview', 'dry-run'].includes(command)) throw new Error('Usa push o pull: il confronto è già incluso, prima della conferma.');
   if (['push', 'pull', 'upload', 'download'].includes(command)) return runSync(sync, command === 'push' || command === 'upload' ? 'push' : 'pull', ui);
   if (command === 'local') return runLocal(sync, args, ui);
@@ -32,7 +35,7 @@ export async function runCli(argv, { dir, ui } = {}) {
   else if (command === 'remote') {
     if (args.length) throw new Error('Per cambiare remote usa setup <url>.');
     ui.notify(sync.text(['remote', 'get-url', 'origin']).replace(/\/\/[^/@\s]+@/g, '//[nascosto]@'));
-  } else ui.notify('node cli.mjs push | pull | status | log | setup <url> | remote | ignore [list|add|remove] [pattern]\n' + localUsage);
+  } else ui.notify('node cli.mjs push | pull | packages | status | log | setup <url> | remote | ignore [list|add|remove] [pattern]\n' + localUsage);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
