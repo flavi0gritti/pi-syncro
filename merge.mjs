@@ -57,6 +57,27 @@ export function mergeJson(base, local, remote, { file = 'settings.json', resolut
   return local; // Provisional only: apply refuses plans with unresolved conflicts.
 }
 
+// Pull must not silently keep a package removed only on this machine while it
+// is still declared remotely. Persistent opt-outs belong in excludedPackages.
+// Keep explicit conflict choices and locally added packages intact.
+export function restoreRemotePackages(merged, remote, { resolutions = {}, conflicts = [] } = {}) {
+  const result = { value: merged, restored: [] };
+  if (!object(merged) || !object(remote) || !Array.isArray(remote.packages)) return result;
+  if (merged.packages !== undefined && !Array.isArray(merged.packages)) return result;
+  const blocked = path => resolutions[JSON.stringify(['settings.json', ...path])] === 'local'
+    || conflicts.some(c => c.id === JSON.stringify(['settings.json', ...path]));
+  if (blocked([]) || blocked(['packages'])) return result;
+  const present = new Set((merged.packages || []).map(packageKey));
+  for (const pkg of remote.packages) {
+    const key = packageKey(pkg);
+    if (present.has(key) || blocked(['packages', key])) continue;
+    if (!result.restored.length) result.value = structuredClone(merged);
+    (result.value.packages ||= []).push(structuredClone(pkg));
+    result.restored.push(key); present.add(key);
+  }
+  return result;
+}
+
 export function normalized(bytes) {
   if (bytes && !bytes.includes(0) && Buffer.from(bytes.toString('utf8')).equals(bytes)) return Buffer.from(bytes.toString('utf8').replace(/\r\n/g, '\n'));
   return bytes;

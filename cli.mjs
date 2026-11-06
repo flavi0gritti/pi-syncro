@@ -17,6 +17,8 @@ export async function runCli(argv, { dir, ui } = {}) {
     const rl = createInterface({ input: process.stdin, output: process.stdout });
     try { return await rl.question(question); } finally { rl.close(); }
   }, message => console.log(message));
+  // Keep retry hooks scoped to this invocation/root, not a caller's shared UI.
+  ui = { ...ui };
   ui.packages ||= () => runPackages(root, ui);
   if (command === 'packages') return runPackages(root, ui);
   if (['diff', 'preview', 'dry-run'].includes(command)) throw new Error('Usa push o pull: il confronto è già incluso, prima della conferma.');

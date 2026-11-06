@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash, randomUUID } from 'node:crypto';
 import { formatDiff } from './diff-view.mjs';
-import { MISSING, same, parse, encode, normalized, mergeFile, object } from './merge.mjs';
+import { MISSING, same, parse, encode, normalized, mergeFile, object, restoreRemotePackages } from './merge.mjs';
 import { parseRules, validateRules, projectSettings, sharedSettings, changeRules, rulesNotes, stripAutomaticSettings, localSettingFields } from './local-rules.mjs';
 
 const equal = (a, b) => a === undefined ? b === undefined : b !== undefined && a.equals(b);
@@ -140,7 +140,7 @@ export function createSync(dir) {
   }
   function build(snapshot, resolutions = {}) {
     const { direction, head, remote, base, upstream, work, rules, saved } = snapshot;
-    const target = new Map(direction === 'push' ? base : work), conflicts = [];
+    const target = new Map(direction === 'push' ? base : work), conflicts = [], packageNotes = [];
     let shared;
     for (const p of new Set([...base.keys(), ...work.keys(), ...upstream.keys()])) {
       if (privateFile(p)) { if (direction === 'push') target.delete(p); continue; }
@@ -148,6 +148,13 @@ export function createSync(dir) {
       const local = p === 'settings.json' ? canonicalSettings(work.get(p), base.get(p), rules, saved) : normalized(work.get(p));
       let value = direction === 'push' ? local : mergeFile(p, p === 'settings.json' ? commonBytes(base.get(p)) : base.get(p), local, p === 'settings.json' ? commonBytes(upstream.get(p)) : upstream.get(p), resolutions, conflicts);
       if (p === 'settings.json') {
+        if (direction === 'pull') {
+          const restored = restoreRemotePackages(parse(value), parse(upstream.get(p)), { resolutions, conflicts });
+          if (restored.restored.length) {
+            value = encode(restored.value);
+            packageNotes.push(`Ripristinati ${restored.restored.length} pacchetti ancora dichiarati su GitHub. Per disattivarli solo qui usa local exclude-package.`);
+          }
+        }
         shared = value;
         if (direction === 'pull') value = project(value, rules, work.get(p));
       }
@@ -161,7 +168,7 @@ export function createSync(dir) {
     const sharedValue = parse(shared);
     const managesSettings = !ignored('settings.json') && [base, work, upstream].some(files => files.has('settings.json'));
     const newState = !managesSettings ? undefined : encode({ version: 1, rules, shared: sharedValue === MISSING ? null : sharedValue });
-    const plan = { ...snapshot, target, before, changes, conflicts, resolutions, newState, privatePaths: changes.filter(privateFile), notes: [...rulesNotes(rules), ...(changes.includes('models-store.json') ? ['models-store.json resta sul PC: viene rimossa solo la vecchia copia condivisa.'] : [])] };
+    const plan = { ...snapshot, target, before, changes, conflicts, resolutions, newState, privatePaths: changes.filter(privateFile), notes: [...rulesNotes(rules), ...packageNotes, ...(changes.includes('models-store.json') ? ['models-store.json resta sul PC: viene rimossa solo la vecchia copia condivisa.'] : [])] };
     if (direction === 'push' && !conflicts.length) checkInlineSecrets(target);
     validateWrites(plan); return plan;
   }
