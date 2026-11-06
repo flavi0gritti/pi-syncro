@@ -32,29 +32,32 @@ test('materialization uses accepted global packages including pins and object fi
   const packages = ['git:github.com/example/tool@v1', { source: 'npm:@example/tool@1.2.3', extensions: [] }];
   const bytes = JSON.stringify({ packages, theme: 'dark' });
   writeFileSync(join(dir, 'settings.json'), bytes);
-  let resolved = false;
+  const installed = new Set();
   const sdk = {
     SettingsManager: { inMemory: settings => { assert.deepEqual(settings, { packages }); return settings; } },
     DefaultPackageManager: class {
       constructor(options) { assert.equal(options.agentDir, dir); assert.equal(options.cwd, dir); }
-      async resolve(onMissing) { assert.equal(await onMissing(packages[0]), 'install'); resolved = true; }
-      getInstalledPath(source, scope) { assert.equal(scope, 'user'); assert.ok(packages.some(p => (p.source || p) === source)); return dir; }
+      async install(source, options) { assert.deepEqual(options, { local: false }); installed.add(source); }
+      getInstalledPath(source, scope) { assert.equal(scope, 'user'); assert.ok(packages.some(p => (p.source || p) === source)); return installed.has(source) ? dir : undefined; }
     },
   };
-  await materializePackages(dir, sdk);
-  assert.ok(resolved); assert.equal(readFileSync(join(dir, 'settings.json'), 'utf8'), bytes);
+  assert.deepEqual(await materializePackages(dir, sdk), { installed: 2, total: 2 });
+  assert.deepEqual([...installed], [packages[0], packages[1].source]);
+  assert.deepEqual(await materializePackages(dir, sdk), { installed: 0, total: 2 });
+  assert.equal(readFileSync(join(dir, 'settings.json'), 'utf8'), bytes);
 });
 test('missing local paths are not reported as installed', async t => {
   const dir = temp(t); writeFileSync(join(dir, 'settings.json'), JSON.stringify({ packages: ['./missing'] }));
-  const sdk = { SettingsManager: { inMemory: x => x }, DefaultPackageManager: class { async resolve() {} getInstalledPath() { return undefined; } } };
+  const sdk = { SettingsManager: { inMemory: x => x }, DefaultPackageManager: class { async install() {} getInstalledPath() { return undefined; } } };
   await assert.rejects(materializePackages(dir, sdk), /mancante/);
 });
 test('worker completes without shell and timeout returns a retryable failure', async t => {
   const dir = temp(t); writeFileSync(join(dir, 'settings.json'), '{"packages":[]}');
   const sdkFile = join(dir, 'sdk.mjs');
   writeFileSync(sdkFile, 'export const SettingsManager = {inMemory: x=>x}; export class DefaultPackageManager {async resolve() {}}');
-  assert.equal(await updatePackages(dir, { sdkURL: pathToFileURL(sdkFile).href, timeout: 5000 }), true);
-  writeFileSync(sdkFile, 'export const SettingsManager = {inMemory: x=>x}; export class DefaultPackageManager {async resolve() {await new Promise(r=>setTimeout(r,60000))}}');
+  assert.deepEqual(await updatePackages(dir, { sdkURL: pathToFileURL(sdkFile).href, timeout: 5000 }), { installed: 0, total: 0 });
+  writeFileSync(join(dir, 'settings.json'), '{"packages":["git:github.com/example/missing"]}');
+  writeFileSync(sdkFile, 'export const SettingsManager = {inMemory: x=>x}; export class DefaultPackageManager {getInstalledPath() {} async install() {await new Promise(r=>setTimeout(r,60000))}}');
   assert.equal(await updatePackages(dir, { sdkURL: pathToFileURL(sdkFile).href, timeout: 300 }), false);
   // Windows taskkill is asynchronous; avoid removing a running worker's directory immediately.
   await new Promise(r => setTimeout(r, 500));
@@ -70,4 +73,30 @@ test('pull reconciles after apply and on no-op, never on push or cancellation', 
   await runSync(sync, 'pull', view); assert.deepEqual(calls, []);
   plan.changes = []; plan.remote = plan.head;
   await runSync(sync, 'pull', view); assert.deepEqual(calls, ['packages']);
+});
+
+test('pull writes an incoming package then installs it via the native installer', async t => {
+  const dir = temp(t);
+  writeFileSync(join(dir, 'settings.json'), '{"packages":[]}');
+  const source = 'git:github.com/example/incoming';
+  const present = new Set(), calls = [];
+  const sdk = {
+    SettingsManager: { inMemory: x => x },
+    DefaultPackageManager: class {
+      getInstalledPath(s) { return present.has(s) ? dir : undefined; }
+      async install(s) { calls.push(s); present.add(s); }
+    },
+  };
+  const sync = {
+    prepare: () => ({ conflicts: [], changes: ['settings.json'], head: 'a', remote: 'b' }),
+    apply: () => { writeFileSync(join(dir, 'settings.json'), JSON.stringify({ packages: [source] })); return 'backup'; },
+  };
+  const view = { ...ui(), review: async () => true };
+  view.packages = () => runPackages(dir, view, d => materializePackages(d, sdk));
+  assert.equal(await runSync(sync, 'pull', view), true);
+  assert.deepEqual(calls, [source]);
+  assert.match(view.messages.join('\n'), /Installati 1 pacchetti mancanti/);
+  await view.packages();
+  assert.deepEqual(calls, [source]);
+  assert.match(view.messages.join('\n'), /Nessun pacchetto da installare/);
 });
