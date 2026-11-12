@@ -7,19 +7,56 @@ import { runSync, runLocal, runIgnore } from '../commands.mjs';
 import { runPackages } from '../packages.mjs';
 import { createDiffScreen } from './diff-screen.js';
 
+// Pi owns keyboard navigation, focus, rendering, and cancellation; keep the
+// extension-side adapter limited to mapping the selected unique label to a value.
+export async function selectChoice<T>(select: (title: string, labels: string[]) => Promise<string | undefined>, title: string, choices: readonly { label: string; value: T }[]): Promise<T | undefined> {
+  if (choices.length === 0) return undefined;
+  const labels = choices.map(({ label }) => String(label)
+    .replace(/[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim());
+  if (labels.some(label => !label)) throw new Error('Etichetta vuota nel menu.');
+  if (new Set(labels).size !== labels.length) throw new Error('Etichette duplicate nel menu.');
+  const selected = await select(String(title), labels);
+  if (selected === undefined) return undefined;
+  const index = labels.indexOf(selected);
+  return index < 0 ? undefined : choices[index].value;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerCommand('sync', {
     description: 'Push e pull con confronto, conflitti per impostazione ed eccezioni locali guidate',
     handler: async (args, ctx) => {
-      const [command = 'help', ...rest] = args.trim().split(/\s+/);
+      let [command, ...rest] = args.trim().split(/\s+/);
+      if (!command) {
+        if (!ctx.hasUI || ctx.mode !== 'tui') {
+          ctx.ui.notify('Il menu /sync richiede la UI interattiva di Pi.', 'warning');
+          return;
+        }
+        try {
+          const selectedCommand = await selectChoice((title, labels) => ctx.ui.select(title, labels), 'Sync · scegli operazione', [
+            { label: 'Push · invia le modifiche a GitHub', value: 'push' },
+            { label: 'Pull · ricevi le modifiche da GitHub', value: 'pull' },
+            { label: 'Eccezioni locali · configura questo PC', value: 'local' },
+            { label: 'Pacchetti · gestisci installazioni', value: 'packages' },
+            { label: 'Stato · mostra modifiche locali', value: 'status' },
+            { label: 'Cronologia · ultimi commit', value: 'log' },
+            { label: 'Esclusioni file · mostra o modifica', value: 'ignore' },
+          ]);
+          if (!selectedCommand) return;
+          command = selectedCommand;
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
+          return;
+        }
+      }
       const dir = getAgentDir(), sync = createSync(dir);
       const ui = {
         packages: () => runPackages(dir, ui),
         notify: (message: string) => ctx.ui.notify(message, 'info'),
         input: (title: string) => ctx.ui.input(title),
         async choose(title: string, choices: { label: string; value: any }[]) {
-          const answer = await ctx.ui.select(title, choices.map(c => c.label));
-          return choices.find(c => c.label === answer)?.value;
+          return selectChoice((menuTitle, labels) => ctx.ui.select(menuTitle, labels), title, choices);
         },
         async review(plan: any) {
           const files = buildDiffFiles(plan);
